@@ -767,6 +767,7 @@ impl Context {
 }
 
 impl Context {
+    #[inline(always)]
     fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
@@ -774,6 +775,7 @@ impl Context {
         f(self, opcode)
     }
 
+    #[inline(always)]
     fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
