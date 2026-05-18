@@ -17,19 +17,26 @@ pub(crate) const PIC_CAPACITY: usize = 4;
 
 /// A cached shape-to-slot mapping for a polymorphic inline cache.
 ///
-/// `shape_addr` is the live heap address of the cached shape's GC-managed
-/// inner allocation. It's the hot field used for the equality check on the
-/// fast path. `weak` keeps a weak reference to the shape for liveness
-/// verification — needed to avoid a false-positive match if the cached
-/// shape was dropped and the heap address was reused for a different shape.
-/// Checking `weak.is_upgradable()` is cheap (no atomic ref-count traffic),
-/// unlike `weak.upgrade()` which the previous implementation called.
+/// The address compare and the liveness check are intentionally fused into
+/// [`CacheEntry::matches`]. Both halves are load-bearing for GC soundness —
+/// see [`WeakShape::is_upgradable`] for the finalize-before-sweep argument
+/// that the IC hit path relies on. Splitting them out for "one less load"
+/// would silently reintroduce the use-after-free class of bug, so the
+/// raw address field is private and there is no public accessor that
+/// returns it without also checking liveness.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub(crate) struct CacheEntry {
     /// Address of the cached shape's `Inner` GC allocation. Used for the
     /// pointer-equality check that dominates the IC hit path.
+    ///
+    /// **Private on purpose.** Callers consume cache entries through
+    /// [`CacheEntry::matches`], which pairs this load with the liveness
+    /// check. Reading `shape_addr` alone is unsound: if the cached shape's
+    /// allocation has been freed, the GC is free to reuse its address for
+    /// a fresh allocation, and an unguarded pointer-equality compare will
+    /// produce a false-positive hit on the new (and very different) shape.
     #[unsafe_ignore_trace]
-    pub(crate) shape_addr: usize,
+    shape_addr: usize,
 
     /// Weak reference to the cached shape. Only consulted on the IC hit
     /// path for an aliveness check (`is_upgradable()`, no atomic ops); the
@@ -39,6 +46,21 @@ pub(crate) struct CacheEntry {
     /// Slot within the shape's property table where the property lives.
     #[unsafe_ignore_trace]
     pub(crate) slot: Slot,
+}
+
+impl CacheEntry {
+    /// Fused address + liveness check.
+    ///
+    /// Returns `true` iff `shape`'s GC allocation is the one this entry
+    /// cached *and* that allocation is still live. The two checks must
+    /// stay paired: see [`WeakShape::is_upgradable`] for the
+    /// finalize-before-sweep argument that makes this single combined
+    /// check sufficient (and the equivalent of an `upgrade()` call,
+    /// minus the atomic ref-count traffic).
+    #[inline]
+    pub(crate) fn matches(&self, shape: &Shape) -> bool {
+        self.shape_addr == shape.to_addr_usize() && self.shape.is_upgradable()
+    }
 }
 
 /// An inline cache entry for a property access.
@@ -64,7 +86,10 @@ impl fmt::Display for InlineCache {
         }
 
         let entries = self.entries.borrow();
-        let entries = entries.iter().map(|e| e.shape_addr).format(", ");
+        // `shape_addr` is private — `WeakShape::to_addr_usize()` returns the
+        // same address while the shape is live and `0` once it's been
+        // collected, which is a strictly more informative display anyway.
+        let entries = entries.iter().map(|e| e.shape.to_addr_usize()).format(", ");
 
         write!(f, "({entries:#x}))")
     }
@@ -114,10 +139,9 @@ impl InlineCache {
     ///   * one branch on `megamorphic`
     ///   * a borrow of the entries vec (debug-checked refcount in
     ///     `GcRefCell`, ~one load + cmov)
-    ///   * up to `PIC_CAPACITY` (=4) pointer-equality checks against the
-    ///     cached shape addresses
-    ///   * one liveness check via `WeakShape::is_upgradable()`, which is
-    ///     a plain memory load — no atomic ops
+    ///   * up to `PIC_CAPACITY` (=4) [`CacheEntry::matches`] calls — each
+    ///     a pointer-equality compare paired with a plain-load liveness
+    ///     check on the entry's `WeakShape`
     ///
     /// The previous implementation called `WeakShape::upgrade()` per
     /// candidate entry, costing two atomic ref-count operations per IC hit
@@ -129,10 +153,9 @@ impl InlineCache {
         }
 
         let entries = self.entries.borrow();
-        let shape_addr = shape.to_addr_usize();
 
         for entry in entries.iter() {
-            if entry.shape_addr == shape_addr && entry.shape.is_upgradable() {
+            if entry.matches(shape) {
                 return Some(entry.slot);
             }
         }

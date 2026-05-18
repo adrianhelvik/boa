@@ -263,6 +263,26 @@ impl WeakShape {
 
     /// Liveness check that avoids the atomic ref-count traffic of `upgrade()`. Suitable for
     /// the IC fast path where we just need to know whether the cached shape is still alive.
+    ///
+    /// # GC ordering invariant (load-bearing)
+    ///
+    /// The inline cache stores a cached shape's raw heap address alongside a
+    /// [`WeakShape`] for liveness verification, and on the hit path performs
+    /// the address compare and this liveness check as a single fused step
+    /// (see [`crate::vm::inline_cache::CacheEntry::matches`]). For that to be
+    /// sound, the GC must clear this ephemeron's `data` slot *before* sweep
+    /// frees the strong allocation it points at. If sweep ran first, the
+    /// allocator could hand the freed address out to a fresh shape; an IC
+    /// entry still believing the old address belongs to its cached shape
+    /// would then see `shape_addr == fresh.to_addr_usize()` and reach for
+    /// the stale `Slot`, reading or writing through a property table that
+    /// belongs to an unrelated shape. `is_upgradable()` returning `false`
+    /// before the allocation is reused is what closes that hole.
+    ///
+    /// Boa's GC performs finalize-then-sweep in exactly that order, so the
+    /// fused check is sufficient. Anything that loosens this ordering needs
+    /// to either restore the explicit `upgrade()` on the hit path or rework
+    /// the IC entry layout.
     #[inline]
     #[must_use]
     pub(crate) fn is_upgradable(&self) -> bool {
