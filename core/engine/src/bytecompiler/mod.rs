@@ -1043,6 +1043,24 @@ impl<'ctx> ByteCompiler<'ctx> {
         object: &Register,
         ident: Sym,
     ) {
+        self.emit_set_property_by_name_op(
+            value.variable(),
+            receiver.map(Register::variable),
+            object.variable(),
+            ident,
+        );
+    }
+
+    /// Operand-level variant of [`emit_set_property_by_name`]. Pairs with
+    /// [`compile_expr_operand`] so identifier-as-receiver patterns skip the
+    /// temp register + Move.
+    fn emit_set_property_by_name_op(
+        &mut self,
+        value: RegisterOperand,
+        receiver: Option<RegisterOperand>,
+        object: RegisterOperand,
+        ident: Sym,
+    ) {
         let ic_index = self.ic.len() as u32;
 
         let name_index = self.get_or_insert_name(ident);
@@ -1052,18 +1070,11 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.ic.push(InlineCache::new(name.clone()));
 
         if let Some(receiver) = receiver {
-            self.bytecode.emit_set_property_by_name_with_this(
-                value.variable(),
-                receiver.variable(),
-                object.variable(),
-                ic_index.into(),
-            );
+            self.bytecode
+                .emit_set_property_by_name_with_this(value, receiver, object, ic_index.into());
         } else {
-            self.bytecode.emit_set_property_by_name(
-                value.variable(),
-                object.variable(),
-                ic_index.into(),
-            );
+            self.bytecode
+                .emit_set_property_by_name(value, object, ic_index.into());
         }
     }
 
@@ -1562,11 +1573,21 @@ impl<'ctx> ByteCompiler<'ctx> {
             Access::Property { access } => match access {
                 PropertyAccess::Simple(access) => match access.field() {
                     PropertyAccessField::Const(name) => {
-                        let object = self.register_allocator.alloc();
-                        self.compile_expr(access.target(), &object);
-                        let value = expr_fn(self);
-                        self.emit_set_property_by_name(value, None, &object, name.sym());
-                        self.register_allocator.dealloc(object);
+                        // Mirror of the GET path: when `target` is an
+                        // Identifier with a local/cached register, hand its
+                        // operand straight to SetPropertyByName. The closure
+                        // also runs `expr_fn` *after* the target operand is
+                        // resolved, preserving evaluation order.
+                        let sym = name.sym();
+                        self.compile_expr_operand(access.target(), |c, obj_op| {
+                            let value = expr_fn(c);
+                            c.emit_set_property_by_name_op(
+                                value.variable(),
+                                None,
+                                obj_op,
+                                sym,
+                            );
+                        });
                     }
                     PropertyAccessField::Expr(expr) => {
                         let object = self.register_allocator.alloc();
