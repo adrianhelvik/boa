@@ -534,6 +534,13 @@ impl CodeBlock {
             } => {
                 format!("dst:{dst}, binding_index:{binding_index}, ic_index:{ic_index}")
             }
+            Instruction::SetNameGlobal {
+                src,
+                binding_index,
+                ic_index,
+            } => {
+                format!("src:{src}, binding_index:{binding_index}, ic_index:{ic_index}")
+            }
             Instruction::DefineOwnPropertyByName {
                 object,
                 value,
@@ -933,8 +940,7 @@ impl CodeBlock {
             | Instruction::Reserved56
             | Instruction::Reserved57
             | Instruction::Reserved58
-            | Instruction::Reserved59
-            | Instruction::Reserved60 => unreachable!("Reserved opcodes are unreachable"),
+            | Instruction::Reserved59 => unreachable!("Reserved opcodes are unreachable"),
         }
     }
 }

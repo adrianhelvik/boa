@@ -924,9 +924,16 @@ impl<'ctx> ByteCompiler<'ctx> {
                 BindingAccessOpcode::DefInitVar => self
                     .bytecode
                     .emit_def_init_var(value.variable(), (*index).into()),
-                BindingAccessOpcode::SetName => self
-                    .bytecode
-                    .emit_set_name(value.variable(), (*index).into()),
+                BindingAccessOpcode::SetName => {
+                    let ic_index = self.ic.len() as u32;
+                    let name = self.bindings[*index as usize].name().clone();
+                    self.ic.push(InlineCache::new(name));
+                    self.bytecode.emit_set_name_global(
+                        value.variable(),
+                        (*index).into(),
+                        ic_index.into(),
+                    );
+                }
                 BindingAccessOpcode::GetNameAndLocator => self
                     .bytecode
                     .emit_get_name_and_locator(value.variable(), (*index).into()),

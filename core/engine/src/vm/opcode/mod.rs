@@ -1098,6 +1098,20 @@ generate_opcodes! {
     ///   - Input: src
     SetName { src: RegisterOperand, binding_index: IndexOperand },
 
+    /// Assign to a binding on the global object using an inline cache.
+    ///
+    /// Mirrors [`GetNameGlobal`] for the write path: once the IC has cached a
+    /// `(shape, slot)` pair for this access site, the value is written directly
+    /// into the global object's property storage without traversing the
+    /// scope chain or going through the ordinary `[[Set]]` internal method.
+    ///
+    /// - Operands:
+    ///   - binding_index: `IndexOperand`
+    ///   - ic_index: `IndexOperand`
+    /// - Registers:
+    ///   - Input: src
+    SetNameGlobal { src: RegisterOperand, binding_index: IndexOperand, ic_index: IndexOperand },
+
     /// Assigns a value to the binding pointed by the top of the `bindings_stack`.
     ///
     /// - Registers:
@@ -2270,6 +2284,4 @@ generate_opcodes! {
     Reserved58 => Reserved,
     /// Reserved [`Opcode`].
     Reserved59 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved60 => Reserved,
 }
