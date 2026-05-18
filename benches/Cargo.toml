@@ -18,3 +18,7 @@ jemallocator.workspace = true
 [[bench]]
 name = "scripts"
 harness = false
+
+[[bin]]
+name = "bench-compare-runner"
+path = "src/bin/bench-compare-runner.rs"
