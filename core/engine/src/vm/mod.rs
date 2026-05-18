@@ -68,6 +68,21 @@ pub struct Vm {
     /// present at position 0 so the stack is never empty.
     pub(crate) frames: Vec<CallFrame>,
 
+    /// Cached pointer to the current (top-of-stack) call frame.
+    ///
+    /// Updated by [`Self::push_frame`] / [`Self::pop_frame`] so that
+    /// [`Self::frame`] / [`Self::frame_mut`] can avoid the
+    /// `frames.last().unwrap_unchecked()` chain on every opcode dispatch
+    /// (load `frames.ptr`, load `frames.len`, compute address) and read
+    /// the frame address with a single pointer load instead.
+    ///
+    /// SAFETY: must always point inside `frames` and never be null. The
+    /// `frames` `Vec` always contains at least the dummy frame pushed in
+    /// [`Self::new`]. Push/pop re-derive the pointer from
+    /// `frames.last_mut()` after the mutation so it survives any Vec
+    /// reallocation.
+    pub(crate) current_frame_ptr: std::ptr::NonNull<CallFrame>,
+
     pub(crate) stack: Stack,
 
     pub(crate) return_value: JsValue,
@@ -412,8 +427,12 @@ impl Vm {
             EnvironmentStack::new(),
             realm,
         ));
+        // SAFETY: we just pushed the dummy frame, so `last_mut()` is `Some`.
+        let current_frame_ptr =
+            std::ptr::NonNull::from(unsafe { frames.last_mut().unwrap_unchecked() });
         Self {
             frames,
+            current_frame_ptr,
             stack: Stack::new(1024),
             return_value: JsValue::undefined(),
             pending_exception: None,
@@ -569,8 +588,10 @@ impl Vm {
     #[track_caller]
     #[inline]
     pub(crate) fn frame(&self) -> &CallFrame {
-        // SAFETY: `frames` always contains at least the dummy frame.
-        unsafe { self.frames.last().unwrap_unchecked() }
+        // SAFETY: `current_frame_ptr` is established in `Vm::new` and re-derived
+        // by every `push_frame` / `pop_frame`, so it always points to a live
+        // entry inside `frames`.
+        unsafe { self.current_frame_ptr.as_ref() }
     }
 
     /// Retrieves the VM frame mutably.
@@ -581,8 +602,10 @@ impl Vm {
     #[track_caller]
     #[inline]
     pub(crate) fn frame_mut(&mut self) -> &mut CallFrame {
-        // SAFETY: `frames` always contains at least the dummy frame.
-        unsafe { self.frames.last_mut().unwrap_unchecked() }
+        // SAFETY: same invariant as `frame`. The `&mut self` receiver
+        // guarantees we don't alias any other live `&CallFrame` borrow
+        // derived from this pointer.
+        unsafe { self.current_frame_ptr.as_mut() }
     }
 
     pub(crate) fn push_frame(&mut self, mut frame: CallFrame) {
@@ -616,6 +639,11 @@ impl Vm {
             .push_bytecode(current_pc, frame.code_block().source_info.clone());
 
         self.frames.push(frame);
+        // Re-derive `current_frame_ptr` after the push: pushing onto `frames`
+        // can reallocate and invalidate any prior pointer into the buffer.
+        // SAFETY: we just pushed, so `last_mut()` is `Some`.
+        self.current_frame_ptr =
+            std::ptr::NonNull::from(unsafe { self.frames.last_mut().unwrap_unchecked() });
     }
 
     pub(crate) fn push_frame_with_stack(
@@ -636,7 +664,14 @@ impl Vm {
             return None;
         }
         self.shadow_stack.pop();
-        self.frames.pop()
+        let popped = self.frames.pop();
+        // After popping, the previous frame is the new tip. Re-derive
+        // `current_frame_ptr` so subsequent `frame()` calls see it.
+        // SAFETY: the length check above guarantees `frames` still has at
+        // least the dummy frame, so `last_mut()` is `Some`.
+        self.current_frame_ptr =
+            std::ptr::NonNull::from(unsafe { self.frames.last_mut().unwrap_unchecked() });
+        popped
     }
 
     /// Handles an exception thrown at position `pc`.
