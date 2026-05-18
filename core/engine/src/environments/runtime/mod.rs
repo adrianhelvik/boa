@@ -450,6 +450,23 @@ impl<'a> Iterator for EnvironmentChainIter<'a> {
 }
 
 impl Context {
+    /// Returns `true` when [`Self::find_runtime_binding`] would take the
+    /// early-return path — i.e. the active environment is a plain
+    /// declarative environment with no `with` and no `eval`-induced
+    /// poisoning. In that case the bytecode-resolved [`BindingLocator`]
+    /// already points to the correct binding, so opcode handlers can skip
+    /// cloning the locator (which costs a [`JsString`] refcount inc on
+    /// every access).
+    #[inline]
+    pub(crate) fn binding_locator_stable(&self) -> bool {
+        let global = self.vm.frame().realm.environment();
+        self.vm
+            .frame()
+            .environments
+            .current_declarative_ref(global)
+            .is_some_and(|env| !env.with() && !env.poisoned())
+    }
+
     /// Gets the corresponding runtime binding of the provided `BindingLocator`, modifying
     /// its indexes in place.
     ///

@@ -1,12 +1,59 @@
 use boa_ast::scope::{BindingLocator, BindingLocatorScope};
 
 use crate::{
-    Context, JsError, JsExpect, JsNativeError, JsResult,
+    Context, JsError, JsExpect, JsNativeError, JsResult, JsValue,
     environments::Environment,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
     vm::opcode::{IndexOperand, Operation, RegisterOperand},
 };
+
+/// Try to write `value` into the binding at `binding_index_in_code_block`
+/// without cloning the [`BindingLocator`].
+///
+/// Returns [`None`] on a successful fast-path write. Returns
+/// `Some(value)` (giving ownership back) when the caller must fall back to
+/// the full [`SetName`] slow path because the binding lives in an object
+/// environment, is uninitialised, sits on the global object (the
+/// global-object write path is owned by [`SetNameGlobal`]), or the active
+/// environment isn't a plain declarative one.
+#[inline]
+fn try_set_binding_fast(
+    context: &mut Context,
+    binding_index_in_code_block: usize,
+    value: JsValue,
+) -> Option<JsValue> {
+    if !context.binding_locator_stable() {
+        return Some(value);
+    }
+    let (scope, binding_index) = {
+        let b = &context.vm.frame().code_block.bindings[binding_index_in_code_block];
+        (b.scope(), b.binding_index())
+    };
+    match scope {
+        BindingLocatorScope::Stack(env_index) => {
+            if let Environment::Declarative(env) = context.environment_expect(env_index) {
+                // `env.get` clones the stored value just to test initialisation
+                // — fine for the hot path because the values written through
+                // SetName are typically primitives (no GC ops on clone).
+                if env.get(binding_index).is_some() {
+                    env.set(binding_index, value);
+                    return None;
+                }
+            }
+            Some(value)
+        }
+        BindingLocatorScope::GlobalDeclarative => {
+            let env = context.vm.frame().realm.environment();
+            if env.get(binding_index).is_some() {
+                env.set(binding_index, value);
+                return None;
+            }
+            Some(value)
+        }
+        BindingLocatorScope::GlobalObject => Some(value),
+    }
+}
 
 /// `ThrowMutateImmutable` implements the Opcode Operation for `Opcode::ThrowMutateImmutable`
 ///
@@ -53,6 +100,16 @@ impl SetName {
         context: &mut Context,
     ) -> JsResult<()> {
         let value = context.vm.get_register(value.into()).clone();
+
+        // Fast path: writes into a plain declarative environment skip the
+        // `BindingLocator` clone and the `find_runtime_binding` walk. The
+        // helper returns ownership of `value` back when it could not take
+        // the fast path, so the slow path below can consume it.
+        let value = match try_set_binding_fast(context, usize::from(index), value) {
+            None => return Ok(()),
+            Some(v) => v,
+        };
+
         let code_block = context.vm.frame().code_block();
         let mut binding_locator = code_block.bindings[usize::from(index)].clone();
         let strict = code_block.strict();
