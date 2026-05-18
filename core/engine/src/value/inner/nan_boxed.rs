@@ -681,7 +681,7 @@ impl NanBoxedValue {
     /// The inner value must be a valid `JsObject`.
     #[must_use]
     #[inline(always)]
-    unsafe fn as_object_unchecked(&self) -> ManuallyDrop<JsObject> {
+    pub(crate) unsafe fn as_object_unchecked(&self) -> ManuallyDrop<JsObject> {
         let addr = bits::untag_pointer(self.value());
         // SAFETY: This is guaranteed by the caller.
         unsafe {

@@ -117,6 +117,31 @@ pub use boa_macros::js_value;
 #[derive(Finalize, Debug, Clone, Trace)]
 pub struct JsValue(inner::InnerValue);
 
+/// A non-owning, borrow-style handle to a [`JsObject`] held inside a
+/// [`JsValue`].
+///
+/// Returned by [`JsValue::as_object_borrowed`] for hot paths that need to
+/// read through to the underlying object without paying the GC refcount
+/// inc/dec pair that [`JsValue::as_object`] performs. Dereferences to
+/// [`JsObject`] so all the usual object methods are available.
+///
+/// The borrow lifetime is tied to the source `JsValue`, which keeps the
+/// GC allocation alive for the duration of the borrow.
+#[derive(Debug)]
+pub(crate) struct JsObjectBorrow<'a> {
+    inner: std::mem::ManuallyDrop<JsObject>,
+    _phantom: std::marker::PhantomData<&'a JsValue>,
+}
+
+impl std::ops::Deref for JsObjectBorrow<'_> {
+    type Target = JsObject;
+
+    #[inline(always)]
+    fn deref(&self) -> &JsObject {
+        &self.inner
+    }
+}
+
 impl JsValue {
     /// Create a new [`JsValue`] from an inner value.
     #[inline]
@@ -321,6 +346,34 @@ impl JsValue {
     #[must_use]
     pub fn as_object(&self) -> Option<JsObject> {
         self.0.as_object()
+    }
+
+    /// Returns a non-owning, borrow-style handle to the inner [`JsObject`]
+    /// without incrementing its GC reference count.
+    ///
+    /// `as_object` performs a `Gc` clone (one atomic-ish refcount inc plus
+    /// a matching dec on drop) every time it's called. On hot IC-hit paths
+    /// (`GetPropertyByName`, `SetPropertyByName`) the resulting `JsObject`
+    /// is only ever borrowed — never stored or escaped — so the refcount
+    /// traffic is pure waste.
+    ///
+    /// The returned [`JsObjectBorrow`] wraps the inner `JsObject` in a
+    /// [`ManuallyDrop`] so the bit-stolen copy doesn't decrement on drop,
+    /// and ties its lifetime to `self` so the borrow can't outlive the
+    /// owning `JsValue` (whose `Drop` is what keeps the underlying GC
+    /// allocation alive for the duration of the borrow).
+    #[inline]
+    #[must_use]
+    pub(crate) fn as_object_borrowed(&self) -> Option<JsObjectBorrow<'_>> {
+        if !self.0.is_object() {
+            return None;
+        }
+        // SAFETY: just confirmed by `is_object`.
+        let inner = unsafe { self.0.as_object_unchecked() };
+        Some(JsObjectBorrow {
+            inner,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     /// Consumes the value and return the inner object if it was an object.

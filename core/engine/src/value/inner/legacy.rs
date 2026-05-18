@@ -8,6 +8,7 @@ use crate::{JsBigInt, JsObject, JsSymbol, value::Type};
 use boa_engine::JsVariant;
 use boa_gc::{Finalize, Trace, custom_trace};
 use boa_string::JsString;
+use std::mem::ManuallyDrop;
 
 #[derive(Clone, Debug)]
 pub(crate) enum EnumBasedValue {
@@ -244,6 +245,29 @@ impl EnumBasedValue {
         match self {
             Self::Object(value) => Some(value.clone()),
             _ => None,
+        }
+    }
+
+    /// Returns the inner [`JsObject`] without incrementing its reference
+    /// count, wrapped in a [`ManuallyDrop`] so the bit-stolen copy doesn't
+    /// decrement on drop. Matches the nan-boxed backend's signature for
+    /// borrow-style access on hot paths.
+    ///
+    /// # Safety
+    ///
+    /// The inner value must be a valid [`Self::Object`].
+    #[must_use]
+    #[inline(always)]
+    pub(crate) unsafe fn as_object_unchecked(&self) -> ManuallyDrop<JsObject> {
+        match self {
+            Self::Object(value) => {
+                // SAFETY: `ManuallyDrop` ensures we never decrement the
+                // refcount on the bit-stolen copy. The original `JsObject`
+                // inside the enum still owns the reference and drops normally.
+                ManuallyDrop::new(unsafe { std::ptr::read(value) })
+            }
+            // SAFETY: the caller asserts the variant is `Object`.
+            _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 

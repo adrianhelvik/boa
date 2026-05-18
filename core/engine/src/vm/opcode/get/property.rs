@@ -30,10 +30,12 @@ fn get_by_name<const LENGTH: bool>(
     }
 
     // Fast path: if the receiver is already an object, try the IC without
-    // materialising a fresh `JsObject` clone. `base_class()` returns an owned
-    // `JsObject` — for an Object value that means a Gc clone (one atomic
-    // ref-count inc plus a drop later). On an IC hit we don't need that.
-    if let Some(obj) = source.as_object() {
+    // materialising a fresh `JsObject` clone. `as_object_borrowed` returns
+    // a non-owning view, so there is no `Gc` refcount inc/dec pair for an
+    // IC hit. On miss we fall through to the slow path which has to
+    // materialise the prototype anyway when invoking the ordinary internal
+    // method.
+    if let Some(obj) = source.as_object_borrowed() {
         let ic = &context.vm.frame().code_block().ic[usize::from(index)];
         let object_borrowed = obj.borrow();
         if let Some(slot) = ic.get(object_borrowed.shape()) {
@@ -58,10 +60,6 @@ fn get_by_name<const LENGTH: bool>(
             context.vm.set_register(dst.into(), result);
             return Ok(());
         }
-        // IC miss on an object value: fall through to the slow path below,
-        // which has to materialise the prototype anyway when invoking the
-        // ordinary internal method. (Re-borrowing `object_borrowed` is
-        // released here when we `drop(object_borrowed)` below.)
         drop(object_borrowed);
     }
 
