@@ -203,11 +203,22 @@ pub(crate) trait BuiltInConstructor: BuiltInObject {
 }
 
 fn global_binding<B: BuiltInObject>(context: &mut Context) -> JsResult<()> {
-    let name = B::NAME;
-    let attr = B::ATTRIBUTE;
+    // Resolve the per-`B` constants here, then defer to a non-generic
+    // body. Without this, the generic `define_property_or_throw` /
+    // `PropertyDescriptor::builder` chain below was monomorphised once
+    // per builtin (~57 copies, ~10k LLVM lines per the llvm-lines report);
+    // collapsing it to a single shared body cuts compile time meaningfully.
     let intrinsic = B::get(context.intrinsics());
-    let global_object = context.global_object();
+    define_global_binding(B::NAME, B::ATTRIBUTE, intrinsic, context)
+}
 
+fn define_global_binding(
+    name: JsString,
+    attr: Attribute,
+    intrinsic: JsObject,
+    context: &mut Context,
+) -> JsResult<()> {
+    let global_object = context.global_object();
     global_object.define_property_or_throw(
         name,
         PropertyDescriptor::builder()

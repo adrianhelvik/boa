@@ -1167,15 +1167,16 @@ pub(crate) fn validate_and_apply_property_descriptor(
 ///  - [ECMAScript reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-getprototypefromconstructor
+// Takes a `fn` pointer rather than `impl FnOnce(...)` so that every caller
+// (all of which pass a zero-sized fn item like `StandardConstructors::array`
+// or an associated `fn`-pointer const) shares a single monomorphisation
+// instead of producing a unique copy per closure type. Saves ~5k LLVM lines.
 #[track_caller]
-pub(crate) fn get_prototype_from_constructor<F>(
+pub(crate) fn get_prototype_from_constructor(
     constructor: &JsValue,
-    default: F,
+    default: fn(&StandardConstructors) -> &StandardConstructor,
     context: &mut Context,
-) -> JsResult<JsObject>
-where
-    F: FnOnce(&StandardConstructors) -> &StandardConstructor,
-{
+) -> JsResult<JsObject> {
     // 1. Assert: intrinsicDefaultProto is this specification's name of an intrinsic
     // object.
     // The corresponding object must be an intrinsic that is intended to be used

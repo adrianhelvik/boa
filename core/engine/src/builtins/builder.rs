@@ -587,34 +587,63 @@ impl<'ctx> BuiltInBuilder<'ctx, Callable<Constructor>> {
     pub(crate) fn from_standard_constructor<SC: BuiltInConstructor>(
         realm: &'ctx Realm,
     ) -> BuiltInConstructorWithPrototype<'ctx> {
+        // All `SC::*` values are compile-time constants — fold them into a
+        // call to a single non-generic body. Without this, every builtin
+        // constructor monomorphised its own ~160-line copy of the struct
+        // initialisation below (~54 copies, ~8.6k LLVM lines per the
+        // llvm-lines report).
         let constructor = SC::STANDARD_CONSTRUCTOR(realm.intrinsics().constructors());
-        BuiltInConstructorWithPrototype {
+        BuiltInConstructorWithPrototype::from_constants(
             realm,
-            function: SC::constructor,
-            name: js_string!(SC::NAME),
-            length: SC::CONSTRUCTOR_ARGUMENTS,
+            SC::constructor,
+            js_string!(SC::NAME),
+            SC::CONSTRUCTOR_ARGUMENTS,
+            SC::CONSTRUCTOR_STORAGE_SLOTS,
+            SC::PROTOTYPE_STORAGE_SLOTS,
+            constructor.constructor(),
+            constructor.prototype(),
+        )
+    }
+}
+
+impl<'ctx> BuiltInConstructorWithPrototype<'ctx> {
+    fn from_constants(
+        realm: &'ctx Realm,
+        function: NativeFunctionPointer,
+        name: JsString,
+        length: usize,
+        constructor_storage_slots: usize,
+        prototype_storage_slots: usize,
+        constructor: JsObject,
+        prototype: JsObject,
+    ) -> Self {
+        Self {
+            realm,
+            function,
+            name,
+            length,
             constructor_property_table: PropertyTableInner::with_capacity(
-                SC::CONSTRUCTOR_STORAGE_SLOTS
+                constructor_storage_slots
                     + BuiltInConstructorWithPrototype::OWN_CONSTRUCTOR_STORAGE_SLOTS,
             ),
             constructor_storage: Vec::with_capacity(
-                SC::CONSTRUCTOR_STORAGE_SLOTS
+                constructor_storage_slots
                     + BuiltInConstructorWithPrototype::OWN_CONSTRUCTOR_STORAGE_SLOTS,
             ),
-            constructor: constructor.constructor(),
+            constructor,
             #[cfg(debug_assertions)]
-            constructor_storage_slots_expected: SC::CONSTRUCTOR_STORAGE_SLOTS,
+            constructor_storage_slots_expected: constructor_storage_slots,
             prototype_property_table: PropertyTableInner::with_capacity(
-                SC::PROTOTYPE_STORAGE_SLOTS
+                prototype_storage_slots
                     + BuiltInConstructorWithPrototype::OWN_PROTOTYPE_STORAGE_SLOTS,
             ),
             prototype_storage: Vec::with_capacity(
-                SC::PROTOTYPE_STORAGE_SLOTS
+                prototype_storage_slots
                     + BuiltInConstructorWithPrototype::OWN_PROTOTYPE_STORAGE_SLOTS,
             ),
-            prototype: constructor.prototype(),
+            prototype,
             #[cfg(debug_assertions)]
-            prototype_storage_slots_expected: SC::PROTOTYPE_STORAGE_SLOTS,
+            prototype_storage_slots_expected: prototype_storage_slots,
             __proto__: Some(realm.intrinsics().constructors().function().prototype()),
             inherits: Some(realm.intrinsics().constructors().object().prototype()),
             attributes: Attribute::WRITABLE | Attribute::CONFIGURABLE | Attribute::NON_ENUMERABLE,
