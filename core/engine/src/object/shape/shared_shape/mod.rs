@@ -483,11 +483,21 @@ impl WeakSharedShape {
     /// Upgrade returns a [`SharedShape`] pointer for the internal value if the pointer is still live,
     /// or [`None`] if the value was already garbage collected.
     #[inline]
+    #[allow(dead_code)] // Used by tests; the hot path uses `is_upgradable` to avoid atomics.
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<SharedShape> {
         Some(SharedShape {
             inner: self.inner.upgrade()?,
         })
+    }
+
+    /// Check if the referenced [`SharedShape`] is still live, without incurring the atomic
+    /// ref-count increment of [`upgrade`](Self::upgrade). Hot-path callers (IC fast path)
+    /// prefer this.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_upgradable(&self) -> bool {
+        self.inner.is_upgradable()
     }
 }
 

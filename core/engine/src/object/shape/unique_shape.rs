@@ -250,11 +250,20 @@ impl WeakUniqueShape {
     /// Upgrade returns a [`UniqueShape`] pointer for the internal value if the pointer is still live,
     /// or [`None`] if the value was already garbage collected.
     #[inline]
+    #[allow(dead_code)] // Used by tests; the hot path uses `is_upgradable` to avoid atomics.
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<UniqueShape> {
         Some(UniqueShape {
             inner: self.inner.upgrade()?,
         })
+    }
+
+    /// Liveness check that avoids the atomic ref-count traffic of `upgrade()`. Used on the
+    /// IC fast path.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_upgradable(&self) -> bool {
+        self.inner.is_upgradable()
     }
 }
 

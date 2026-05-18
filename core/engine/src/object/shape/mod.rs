@@ -242,6 +242,7 @@ impl WeakShape {
     ///
     /// Returns `0` if the shape has been freed.
     #[inline]
+    #[allow(dead_code)] // Used by tests; the hot path now stores addresses directly.
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
         self.upgrade().as_ref().map_or(0, Shape::to_addr_usize)
@@ -251,11 +252,23 @@ impl WeakShape {
     ///
     /// Returns `0` if the shape has been freed.
     #[inline]
+    #[allow(dead_code)] // Used by tests; the hot path uses `is_upgradable` to avoid atomics.
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<Shape> {
         match self {
             WeakShape::Shared(shape) => Some(shape.upgrade()?.into()),
             WeakShape::Unique(shape) => Some(shape.upgrade()?.into()),
+        }
+    }
+
+    /// Liveness check that avoids the atomic ref-count traffic of `upgrade()`. Suitable for
+    /// the IC fast path where we just need to know whether the cached shape is still alive.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_upgradable(&self) -> bool {
+        match self {
+            WeakShape::Shared(shape) => shape.is_upgradable(),
+            WeakShape::Unique(shape) => shape.is_upgradable(),
         }
     }
 }
