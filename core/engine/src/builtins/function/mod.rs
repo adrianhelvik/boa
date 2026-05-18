@@ -990,9 +990,11 @@ pub(crate) fn function_call(
 ) -> JsResult<CallValue> {
     context.check_runtime_limits()?;
 
-    let function = function_object
-        .downcast_ref::<OrdinaryFunction>()
-        .js_expect("not a function")?;
+    // SAFETY: `function_call` is only reachable through the `__call__` vtable
+    // entry installed by `OrdinaryFunction::internal_methods`, so the inner
+    // data is guaranteed to be an `OrdinaryFunction`. Skipping the runtime
+    // type check shaves a vtable load + compare off every JS function call.
+    let function = unsafe { function_object.downcast_ref_unchecked::<OrdinaryFunction>() };
     let realm = function.realm().clone();
 
     if function.code.is_class_constructor() {
@@ -1107,9 +1109,11 @@ fn function_construct(
 ) -> JsResult<CallValue> {
     context.check_runtime_limits()?;
 
-    let function = this_function_object
-        .downcast_ref::<OrdinaryFunction>()
-        .js_expect("not a function")?;
+    // SAFETY: `function_construct` is only reachable via the `__construct__`
+    // vtable entry installed by `OrdinaryFunction::internal_methods` (which
+    // gates this behind `has_prototype_property` → constructor methods),
+    // so the inner data is guaranteed to be an `OrdinaryFunction`.
+    let function = unsafe { this_function_object.downcast_ref_unchecked::<OrdinaryFunction>() };
     let realm = function.realm().clone();
 
     debug_assert!(

@@ -344,6 +344,32 @@ impl JsObject {
         None
     }
 
+    /// Downcasts a reference to the object's inner data as `T` without
+    /// checking the runtime type tag.
+    ///
+    /// Intended for vtable-dispatched call sites (e.g. `function_call`) where
+    /// the dispatch target is wired to a specific `T` at construction time —
+    /// the type check inside [`Self::downcast_ref`] would otherwise be pure
+    /// overhead on every invocation.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the object's inner data is an instance
+    /// of `T`. If `T` does not match the actual stored type, dereferencing
+    /// the returned `Ref` is undefined behavior.
+    #[must_use]
+    #[track_caller]
+    pub unsafe fn downcast_ref_unchecked<T: NativeObject>(&self) -> Ref<'_, T> {
+        debug_assert!(
+            self.is::<T>(),
+            "downcast_ref_unchecked called with a mismatched type — safety invariant violated"
+        );
+        let obj = self.borrow();
+        // SAFETY: the caller asserts that the inner data is of type `T`.
+        let obj = unsafe { GcRef::cast::<Object<T>>(obj) };
+        Ref::map(obj, |r| r.data())
+    }
+
     /// Downcasts a mutable reference to the object,
     /// if the object is type native object type `T`.
     ///
