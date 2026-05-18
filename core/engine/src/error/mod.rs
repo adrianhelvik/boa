@@ -405,7 +405,14 @@ impl JsError {
     ///
     /// assert!(error.as_native().is_some());
     /// ```
+    //
+    // `#[cold]` + `#[inline(never)]`: error construction is a cold path —
+    // hundreds of `js_error!`/`JsNativeError::*()` sites would otherwise inline
+    // the same Box-and-construct sequence, bloating both compile time and the
+    // hot-path icache footprint of every caller that contains `Err(...)`.
     #[must_use]
+    #[cold]
+    #[inline(never)]
     pub fn from_native(err: JsNativeError) -> Self {
         Self {
             inner: Repr::Native(Box::new(err)),
@@ -428,9 +435,18 @@ impl JsError {
     /// ```
     #[must_use]
     pub fn from_rust(err: impl error::Error) -> Self {
+        // Defer to a non-generic helper to avoid monomorphising the whole
+        // conversion (including the recursive `source()` walk) for every
+        // concrete error type at every call site.
+        Self::from_rust_dyn(&err)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn from_rust_dyn(err: &dyn error::Error) -> Self {
         let mut native_err = JsNativeError::error().with_message(err.to_string());
         if let Some(source) = err.source() {
-            native_err = native_err.with_cause(Self::from_rust(source));
+            native_err = native_err.with_cause(Self::from_rust_dyn(source));
         }
 
         Self::from_native(native_err)
@@ -447,6 +463,8 @@ impl JsError {
     /// assert!(error.as_opaque().is_some());
     /// ```
     #[must_use]
+    #[cold]
+    #[inline(never)]
     pub fn from_opaque(value: JsValue) -> Self {
         // Recover the backtrace from the Error object if present,
         // so it survives the JsError → JsValue → JsError round-trip.
@@ -824,21 +842,26 @@ impl JsError {
 
 impl From<boa_parser::Error> for JsError {
     #[cfg_attr(feature = "native-backtrace", track_caller)]
+    #[cold]
+    #[inline(never)]
     fn from(err: boa_parser::Error) -> Self {
         Self::from(JsNativeError::from(err))
     }
 }
 
 impl From<JsNativeError> for JsError {
+    #[cold]
+    #[inline(never)]
     fn from(error: JsNativeError) -> Self {
-        Self {
-            inner: Repr::Native(Box::new(error)),
-            backtrace: None,
-        }
+        // Funnel through `from_native` so there's exactly one place that
+        // boxes the native error and constructs the `JsError`.
+        Self::from_native(error)
     }
 }
 
 impl From<EngineError> for JsError {
+    #[cold]
+    #[inline(never)]
     fn from(value: EngineError) -> Self {
         Self {
             inner: Repr::Engine(value),
@@ -848,6 +871,8 @@ impl From<EngineError> for JsError {
 }
 
 impl From<RuntimeLimitError> for JsError {
+    #[cold]
+    #[inline(never)]
     fn from(value: RuntimeLimitError) -> Self {
         EngineError::from(value).into()
     }
