@@ -29,6 +29,7 @@ mod function;
 mod generator;
 mod jump_control;
 mod module;
+mod peephole;
 mod register;
 mod statement;
 mod utils;
