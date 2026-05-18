@@ -997,6 +997,25 @@ impl<'ctx> ByteCompiler<'ctx> {
         value: &Register,
         ident: Sym,
     ) {
+        self.emit_get_property_by_name_op(
+            dst.variable(),
+            receiver.map(Register::variable),
+            value.variable(),
+            ident,
+        );
+    }
+
+    /// Operand-level variant of [`emit_get_property_by_name`]. Useful when
+    /// the caller has a `RegisterOperand` directly (e.g. via
+    /// [`compile_expr_operand`]) and wants to avoid materialising it into a
+    /// temporary `Register` + `Move` pair.
+    fn emit_get_property_by_name_op(
+        &mut self,
+        dst: RegisterOperand,
+        receiver: Option<RegisterOperand>,
+        value: RegisterOperand,
+        ident: Sym,
+    ) {
         let ic_index = self.ic.len() as u32;
 
         let name_index = self.get_or_insert_name(ident);
@@ -1006,24 +1025,14 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.ic.push(InlineCache::new(name.clone()));
 
         if let Some(receiver) = receiver {
-            self.bytecode.emit_get_property_by_name_with_this(
-                dst.variable(),
-                receiver.variable(),
-                value.variable(),
-                ic_index.into(),
-            );
+            self.bytecode
+                .emit_get_property_by_name_with_this(dst, receiver, value, ic_index.into());
         } else if name == &StaticJsStrings::LENGTH {
-            self.bytecode.emit_get_length_property(
-                dst.variable(),
-                value.variable(),
-                ic_index.into(),
-            );
+            self.bytecode
+                .emit_get_length_property(dst, value, ic_index.into());
         } else {
-            self.bytecode.emit_get_property_by_name(
-                dst.variable(),
-                value.variable(),
-                ic_index.into(),
-            );
+            self.bytecode
+                .emit_get_property_by_name(dst, value, ic_index.into());
         }
     }
 
@@ -1437,14 +1446,23 @@ impl<'ctx> ByteCompiler<'ctx> {
                 PropertyAccess::Simple(access) => {
                     let mut compiler = self.position_guard(access.field());
 
-                    let object = compiler.register_allocator.alloc();
-                    compiler.compile_expr(access.target(), &object);
-
+                    let dst_op = dst.variable();
                     match access.field() {
                         PropertyAccessField::Const(ident) => {
-                            compiler.emit_get_property_by_name(dst, None, &object, ident.sym());
+                            // Fast path: when `target` is an Identifier with a
+                            // local or const-cached register, `compile_expr_operand`
+                            // skips the alloc+Move and passes that register's
+                            // operand directly to the closure. Eliminates the
+                            // common `Move src:rN, dst:rM; GetByName ..., rM`
+                            // pattern.
+                            let sym = ident.sym();
+                            compiler.compile_expr_operand(access.target(), |c, obj_op| {
+                                c.emit_get_property_by_name_op(dst_op, None, obj_op, sym);
+                            });
                         }
                         PropertyAccessField::Expr(expr) => {
+                            let object = compiler.register_allocator.alloc();
+                            compiler.compile_expr(access.target(), &object);
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
                             compiler.bytecode.emit_get_property_by_value(
@@ -1454,22 +1472,19 @@ impl<'ctx> ByteCompiler<'ctx> {
                                 object.variable(),
                             );
                             compiler.register_allocator.dealloc(key);
+                            compiler.register_allocator.dealloc(object);
                         }
                     }
-                    compiler.register_allocator.dealloc(object);
                 }
                 PropertyAccess::Private(access) => {
                     let mut compiler = self.position_guard(access.field());
 
                     let index = compiler.get_or_insert_private_name(access.field());
-                    let object = compiler.register_allocator.alloc();
-                    compiler.compile_expr(access.target(), &object);
-                    compiler.bytecode.emit_get_private_field(
-                        dst.variable(),
-                        object.variable(),
-                        index.into(),
-                    );
-                    compiler.register_allocator.dealloc(object);
+                    let dst_op = dst.variable();
+                    let idx_op = index.into();
+                    compiler.compile_expr_operand(access.target(), |c, obj_op| {
+                        c.bytecode.emit_get_private_field(dst_op, obj_op, idx_op);
+                    });
                 }
                 PropertyAccess::Super(access) => {
                     let mut compiler = self.position_guard(access.field());
