@@ -8,17 +8,17 @@ use crate::{
 };
 
 fn get_by_name<const LENGTH: bool>(
-    (dst, object, receiver, index): (RegisterOperand, &JsValue, &JsValue, IndexOperand),
+    (dst, source, receiver, index): (RegisterOperand, &JsValue, &JsValue, IndexOperand),
     context: &mut Context,
 ) -> JsResult<()> {
     if LENGTH {
-        if let Some(object) = object.as_object()
+        if let Some(object) = source.as_object()
             && object.is_array()
         {
             let value = object.borrow().properties().storage[0].clone();
             context.vm.set_register(dst.into(), value);
             return Ok(());
-        } else if let Some(string) = object.as_string() {
+        } else if let Some(string) = source.as_string() {
             // NOTE: Since we’re using the prototype returned directly by `base_class()`,
             //       we need to handle string primitives separately due to the
             //       string exotic internal methods.
@@ -29,44 +29,48 @@ fn get_by_name<const LENGTH: bool>(
         }
     }
 
-    // OPTIMIZATION:
-    //    Instead of calling `to_object()`, which creates a temporary wrapper object for primitive
-    //    values (e.g., numbers, strings, booleans) just to query their prototype chain.
-    //
-    //    To prevent the creation of a temporary JsObject, we directly retrieve the prototype that
-    //    `to_object()` would produce, such as `Number.prototype`, `String.prototype`, etc.
-    let object = object.base_class(context)?;
+    // Fast path: if the receiver is already an object, try the IC without
+    // materialising a fresh `JsObject` clone. `base_class()` returns an owned
+    // `JsObject` — for an Object value that means a Gc clone (one atomic
+    // ref-count inc plus a drop later). On an IC hit we don't need that.
+    if let Some(obj) = source.as_object() {
+        let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+        let object_borrowed = obj.borrow();
+        if let Some(slot) = ic.get(object_borrowed.shape()) {
+            let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                let prototype = object_borrowed
+                    .shape()
+                    .prototype()
+                    .expect("prototype should have value");
+                let prototype = prototype.borrow();
+                prototype.properties().storage[slot.index as usize].clone()
+            } else {
+                object_borrowed.properties().storage[slot.index as usize].clone()
+            };
 
-    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
-    let object_borrowed = object.borrow();
-    if let Some(slot) = ic.get(object_borrowed.shape()) {
-        let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            // The cached entry matched the receiver's current shape, so the
-            // shape's prototype chain is unchanged — read directly from the
-            // receiver shape's prototype.
-            let prototype = object_borrowed
-                .shape()
-                .prototype()
-                .expect("prototype should have value");
-            let prototype = prototype.borrow();
-            prototype.properties().storage[slot.index as usize].clone()
-        } else {
-            object_borrowed.properties().storage[slot.index as usize].clone()
-        };
-
-        drop(object_borrowed);
-        if slot.attributes.has_get() && result.is_object() {
-            result =
-                result
+            drop(object_borrowed);
+            if slot.attributes.has_get() && result.is_object() {
+                result = result
                     .as_object()
                     .expect("should contain getter")
                     .call(receiver, &[], context)?;
+            }
+            context.vm.set_register(dst.into(), result);
+            return Ok(());
         }
-        context.vm.set_register(dst.into(), result);
-        return Ok(());
+        // IC miss on an object value: fall through to the slow path below,
+        // which has to materialise the prototype anyway when invoking the
+        // ordinary internal method. (Re-borrowing `object_borrowed` is
+        // released here when we `drop(object_borrowed)` below.)
+        drop(object_borrowed);
     }
 
-    drop(object_borrowed);
+    // Slow path: primitives need `base_class()` to find their prototype
+    // (Number.prototype, String.prototype, etc.) without wrapping; object
+    // values reach this when the IC missed.
+    let object = source.base_class(context)?;
+
+    let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
     let key: PropertyKey = ic.name.clone().into();
 
