@@ -1573,13 +1573,17 @@ impl<'ctx> ByteCompiler<'ctx> {
             Access::Property { access } => match access {
                 PropertyAccess::Simple(access) => match access.field() {
                     PropertyAccessField::Const(name) => {
-                        // Mirror of the GET path: when `target` is an
-                        // Identifier with a local/cached register, hand its
-                        // operand straight to SetPropertyByName. The closure
-                        // also runs `expr_fn` *after* the target operand is
-                        // resolved, preserving evaluation order.
+                        // ES §13.15.2: the base of the property reference is
+                        // captured before the RHS is evaluated. `expr_fn`
+                        // runs inside this closure and may emit arbitrary JS
+                        // (e.g. an assignment that reassigns the receiver
+                        // identifier). Use the *stable* operand helper so a
+                        // mutable Local-binding receiver is snapshotted into
+                        // a temp before the RHS clobbers its register.
+                        // Const-cached receivers skip the snapshot since
+                        // they can't be reassigned.
                         let sym = name.sym();
-                        self.compile_expr_operand(access.target(), |c, obj_op| {
+                        self.compile_expr_operand_stable(access.target(), |c, obj_op| {
                             let value = expr_fn(c);
                             c.emit_set_property_by_name_op(
                                 value.variable(),
@@ -1795,6 +1799,13 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// it allocates a temporary register and compiles into it.
     ///
     /// The `inner_fn` passed in will be called before the register get deallocated.
+    ///
+    /// Callers must not emit code inside `inner_fn` that could write to a
+    /// mutable local binding — the operand handed back for a `Local(Some(reg))`
+    /// identifier *is* the binding's storage. If `inner_fn` evaluates arbitrary
+    /// JS (e.g. an assignment RHS) it can clobber that operand before the
+    /// caller consumes it. Use [`Self::compile_expr_operand_stable`] in that
+    /// case.
     pub(crate) fn compile_expr_operand(
         &mut self,
         expr: &Expression,
@@ -1806,6 +1817,49 @@ impl<'ctx> ByteCompiler<'ctx> {
             let index = self.get_binding(&binding);
             if let BindingKind::Local(Some(local_reg)) = &index {
                 inner_fn(self, RegisterOperand::from(*local_reg));
+                return;
+            }
+            if !self.in_with
+                && let Some(&cached_reg) = self.const_binding_cache.get(&binding.locator())
+            {
+                inner_fn(self, cached_reg.into());
+                return;
+            }
+        }
+        let reg = self.register_allocator.alloc();
+        self.compile_expr(expr, &reg);
+        let op = reg.variable();
+        inner_fn(self, op);
+        self.register_allocator.dealloc(reg);
+    }
+
+    /// Variant of [`Self::compile_expr_operand`] that guarantees the operand's
+    /// value survives `inner_fn`.
+    ///
+    /// Used by paths that evaluate arbitrary JS inside `inner_fn` and emit an
+    /// opcode consuming the operand afterwards (e.g. `o.x = rhs`, where `rhs`
+    /// might reassign `o`). For mutable local-register identifiers we
+    /// snapshot the register up front so the subsequent emit sees the value
+    /// the property reference was resolved against — per ES §13.15.2, the
+    /// base of a property reference is captured before the RHS is evaluated.
+    /// Const-cached registers are stable (the binding can't be reassigned) so
+    /// we still pass them through directly; the slow path already allocates a
+    /// private temp.
+    pub(crate) fn compile_expr_operand_stable(
+        &mut self,
+        expr: &Expression,
+        inner_fn: impl FnOnce(&mut Self, RegisterOperand),
+    ) {
+        if let Expression::Identifier(name) = expr {
+            let resolved = self.resolve_identifier_expect(*name);
+            let binding = self.lexical_scope.get_identifier_reference(resolved);
+            let index = self.get_binding(&binding);
+            if let BindingKind::Local(Some(local_reg)) = &index {
+                let snapshot = self.register_allocator.alloc();
+                self.bytecode
+                    .emit_move(snapshot.variable(), RegisterOperand::from(*local_reg));
+                inner_fn(self, snapshot.variable());
+                self.register_allocator.dealloc(snapshot);
                 return;
             }
             if !self.in_with

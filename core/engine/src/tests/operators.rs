@@ -950,3 +950,138 @@ fn instanceof_custom_has_instance() {
         "#}),
     ]);
 }
+
+// Regression coverage for ES §13.15.2 / §13.3.2.1 — the base of a property
+// reference must be captured *before* the assignment RHS is evaluated. The
+// bytecompiler's "receiver operand passthrough" fast path for
+// `SetPropertyByName` initially used the local binding's persistent register
+// as the receiver operand, so an RHS that reassigned that binding would
+// silently retarget the property write at the new object.
+
+#[test]
+fn property_assignment_captures_receiver_before_rhs_via_comma() {
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let o = {};
+            const saved = o;
+            o.x = (o = { y: 1 }, 42);
+            return saved.x === 42 && o.x === undefined && o.y === 1;
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn property_assignment_captures_receiver_before_rhs_via_call() {
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let o = { tag: "old" };
+            const saved = o;
+            o.x = (function () { o = { tag: "new" }; return 7; })();
+            return saved.x === 7
+                && saved.tag === "old"
+                && o.tag === "new"
+                && o.x === undefined;
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn property_assignment_const_receiver_still_correct() {
+    // The const-cache fast path is also exercised by the elision; verify it
+    // produces the expected result. (Reassigning a `const` is a runtime
+    // TypeError in strict mode and a no-op-then-throws in non-strict, so
+    // the receiver is genuinely stable here.)
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            const o = { y: 1 };
+            o.x = (o.y = 9, 42);
+            return o.x === 42 && o.y === 9;
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn property_compound_assignment_captures_receiver_before_rhs() {
+    // `o.x += expr` reads o.x first, then evaluates expr, then writes back.
+    // The base of the *write* must be the same object whose .x was just
+    // read — not whatever object o was reassigned to in the RHS.
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let o = { x: 10 };
+            const saved = o;
+            o.x += (o = { x: 1000 }, 5);
+            return saved.x === 15 && o.x === 1000;
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn nested_property_assignment_preserves_outer_receiver() {
+    // The outer `o.x = ...` must target the original `o`, even though the
+    // RHS contains an inner assignment that mutates the same binding.
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let o = { tag: "outer" };
+            const outer = o;
+            o.x = (o.y = (o = { tag: "inner" }, 1), 2);
+            return outer.x === 2
+                && outer.y === 1
+                && outer.tag === "outer"
+                && o.tag === "inner";
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn property_assignment_param_receiver_with_reassign_in_rhs() {
+    // Same hazard exists when the receiver is a function parameter, which
+    // is also a `Local(Some(reg))` binding.
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f(o) {
+            const saved = o;
+            o.x = (o = { other: true }, 99);
+            return saved.x === 99 && o.x === undefined && o.other === true;
+        }
+        f({})
+    "#})]);
+}
+
+// Sanity: the GET / object-literal sibling commits don't have an analogous
+// hazard because no JS runs between operand-resolve and emit. Lock that in
+// so a future "optimization" can't regress it.
+
+#[test]
+fn property_get_reads_through_current_binding() {
+    // Plain GET after a reassignment: the next `o.x` read should see the
+    // new object's property. (Trivially true, but it's the property the
+    // GET fast path must preserve.)
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let o = { x: 1 };
+            o = { x: 2 };
+            return o.x === 2;
+        }
+        f()
+    "#})]);
+}
+
+#[test]
+fn object_literal_shorthand_captures_values_in_order() {
+    // For `{ a, b }` with reassignment between, properties are emitted in
+    // source order: the opcode for `a` is emitted before the one for `b`,
+    // so a runtime reassignment between them is visible to the later
+    // property but not the earlier one.
+    run_test_actions([TestAction::assert(indoc! {r#"
+        function f() {
+            let x = 1;
+            const o = { a: x, b: (x = 99, x), c: x };
+            return o.a === 1 && o.b === 99 && o.c === 99;
+        }
+        f()
+    "#})]);
+}
