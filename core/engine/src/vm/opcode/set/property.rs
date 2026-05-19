@@ -20,6 +20,39 @@ fn set_by_name(
 ) -> JsResult<()> {
     let value = context.vm.get_register(value.into()).clone();
 
+    // Fast path: if the target is already an object, write into the IC-cached
+    // data slot through a non-owning borrow — skips the `to_object` clone
+    // (`Gc::clone` on the inner object) the slow path performs.
+    //
+    // Only handles plain (non-accessor) data slots: accessor writes call
+    // a setter which re-enters the VM with `&mut Context`, and the source
+    // register could be reassigned across that re-entry. The owned-object
+    // slow path below keeps the object alive across the setter invocation.
+    if let Some(obj) = value_object.as_object_borrowed() {
+        let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+        let object_borrowed = obj.borrow();
+        if let Some(slot) = ic.get(object_borrowed.shape())
+            && !slot.attributes.is_accessor_descriptor()
+        {
+            let slot_index = slot.index as usize;
+            if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                let prototype = object_borrowed
+                    .shape()
+                    .prototype()
+                    .expect("prototype should have value");
+                drop(object_borrowed);
+                let mut prototype = prototype.borrow_mut();
+                prototype.properties_mut().storage[slot_index] = value;
+            } else {
+                drop(object_borrowed);
+                let mut object_mut = obj.borrow_mut();
+                object_mut.properties_mut().storage[slot_index] = value;
+            }
+            return Ok(());
+        }
+        drop(object_borrowed);
+    }
+
     let object = value_object.to_object(context)?;
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
