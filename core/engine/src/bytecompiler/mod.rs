@@ -2829,6 +2829,15 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         let source_map_entries = self.source_map_builder.build(final_bytecode_len.as_u32());
 
+        // NOTE: the Move-elision peephole pass (`peephole::elide_moves`) is
+        // implemented, sound, and tested, but intentionally *not* applied here.
+        // It shows no measured runtime win — the per-call-site receiver-
+        // passthrough fast paths already cover the hot Moves — so running a
+        // bytecode rewriter on every CodeBlock is risk without reward. To enable
+        // it, route `self.bytecode.into_bytecode()`, `self.handlers`, and
+        // `source_map_entries` through `peephole::elide_moves` and destructure
+        // the resulting `Rewritten` into the fields below.
+
         CodeBlock {
             length: self.length,
             register_count,

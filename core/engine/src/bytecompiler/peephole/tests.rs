@@ -6,9 +6,14 @@
 //! for elision. The "should NOT elide" cases are the load-bearing ones
 //! — they encode the ES §13.15.2 hazard the analysis exists to prevent.
 
-use crate::vm::opcode::{BytecodeEmitter, IndexOperand, RegisterOperand};
+use thin_vec::thin_vec;
 
-use super::{Elision, find_safe_move_elisions};
+use crate::vm::{
+    Handler,
+    opcode::{Address, BytecodeEmitter, IndexOperand, Opcode, RegisterOperand},
+};
+
+use super::{Elision, elide_moves, find_safe_move_elisions};
 
 fn r(i: u32) -> RegisterOperand {
     RegisterOperand::from(i)
@@ -16,6 +21,10 @@ fn r(i: u32) -> RegisterOperand {
 
 fn idx(i: u32) -> IndexOperand {
     IndexOperand::from(i)
+}
+
+fn read_u32(bytes: &[u8], pos: usize) -> u32 {
+    u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap())
 }
 
 #[test]
@@ -29,7 +38,7 @@ fn elides_safe_move_before_set_property_by_name() {
     emit.emit_set_property_by_name(/* value */ r(3), /* object */ r(10), idx(0));
 
     let bytecode = emit.into_bytecode();
-    let elisions = find_safe_move_elisions(&bytecode);
+    let elisions = find_safe_move_elisions(&bytecode, &[]);
 
     assert_eq!(
         elisions,
@@ -59,7 +68,7 @@ fn refuses_elision_when_dst_is_read_again() {
     emit.emit_set_property_by_name(r(3), r(10), idx(0));
     emit.emit_push_from_register(r(10));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert!(
         elisions.is_empty(),
         "elision should be refused when tmp is read later: {elisions:?}",
@@ -88,7 +97,7 @@ fn allows_elision_when_dst_is_overwritten_before_read() {
     emit.emit_move(r(10), r(7));
     emit.emit_push_from_register(r(10));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     let first = elisions
         .iter()
         .find(|e| e.move_pc == move_pc)
@@ -120,7 +129,7 @@ fn refuses_elision_when_op_writes_dst() {
     emit.emit_move(r(10), r(2));
     emit.emit_get_property_by_name(/* dst */ r(10), /* value */ r(3), idx(0));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert!(
         elisions.is_empty(),
         "GetPropertyByName writes its dst — elision refused as a Read substitution",
@@ -136,7 +145,7 @@ fn refuses_elision_when_next_op_is_unknown() {
     // StoreUndefined isn't in the whitelist.
     emit.emit_store_undefined(r(11));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert!(
         elisions.is_empty(),
         "unknown next-op must abort the elision attempt",
@@ -153,7 +162,7 @@ fn refuses_elision_when_subsequent_op_is_unknown() {
     emit.emit_set_property_by_name(r(3), r(10), idx(0));
     emit.emit_store_undefined(r(99));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert!(
         elisions.is_empty(),
         "unknown opcode in forward scan must abort: {elisions:?}",
@@ -174,7 +183,7 @@ fn refuses_elision_when_dst_appears_twice() {
         idx(0),
     );
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert!(
         elisions.is_empty(),
         "elision must refuse when tmp appears in multiple operand slots",
@@ -194,10 +203,103 @@ fn finds_multiple_independent_elisions() {
     let o2 = u32::from(emit.next_opcode_location());
     emit.emit_set_property_by_name(r(6), r(11), idx(1));
 
-    let elisions = find_safe_move_elisions(&emit.into_bytecode());
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
     assert_eq!(elisions.len(), 2, "should find both elisions: {elisions:?}");
     assert_eq!(elisions[0].move_pc, m1);
     assert_eq!(elisions[0].op_pc, o1);
     assert_eq!(elisions[1].move_pc, m2);
     assert_eq!(elisions[1].op_pc, o2);
+}
+
+#[test]
+fn refuses_elision_when_op_is_a_jump_target() {
+    // The data-flow conditions hold, but a backward `Jump` lands on the `Op`.
+    // On that path the `Move` never ran, so `tmp` and `src` may differ —
+    // retargeting `Op` to read `src` would miscompile the jumped-to path.
+    // The analysis (which has no CFG) must refuse based on the target set.
+    let mut emit = BytecodeEmitter::new();
+    emit.emit_move(r(10), r(2));
+    let op_pc = u32::from(emit.next_opcode_location());
+    emit.emit_set_property_by_name(r(3), r(10), idx(0));
+    let jump_pc = emit.next_opcode_location();
+    emit.emit_jump(Address::new(0)); // placeholder
+    emit.patch_jump(jump_pc, Address::new(op_pc)); // jump back to the Op
+
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &[]);
+    assert!(
+        elisions.is_empty(),
+        "must refuse: Op is reachable via a jump that bypasses the Move: {elisions:?}",
+    );
+}
+
+#[test]
+fn refuses_elision_when_op_is_a_handler_catch_entry() {
+    // A `Handler` whose catch entry (`end`) is the `Op` means an exception can
+    // transfer control to `Op` without executing the `Move`. Same hazard as a
+    // jump target; the analysis must consult handlers too.
+    let mut emit = BytecodeEmitter::new();
+    emit.emit_move(r(10), r(2));
+    let op_pc = u32::from(emit.next_opcode_location());
+    emit.emit_set_property_by_name(r(3), r(10), idx(0));
+
+    let handlers = [Handler {
+        start: Address::new(0),
+        end: Address::new(op_pc),
+        environment_count: 0,
+    }];
+    let elisions = find_safe_move_elisions(&emit.into_bytecode(), &handlers);
+    assert!(
+        elisions.is_empty(),
+        "must refuse: Op is a handler catch entry: {elisions:?}",
+    );
+}
+
+#[test]
+fn rewriter_removes_move_patches_consumer_and_remaps_jump() {
+    // End-to-end byte surgery: a `Jump` whose target sits *after* an elidable
+    // `Move` must have its absolute address decremented by the 9 bytes the
+    // `Move` occupied, the consumer's operand must be retargeted tmp -> src,
+    // and the deleted Move's bytes must be gone.
+    let mut emit = BytecodeEmitter::new();
+    let jump_pc = emit.next_opcode_location(); // 0
+    emit.emit_jump(Address::new(0)); // placeholder, 5 bytes
+    emit.emit_move(r(10), r(2)); // elidable, 9 bytes
+    emit.emit_set_property_by_name(r(3), r(10), idx(0)); // consumer, 13 bytes
+    let target = emit.next_opcode_location(); // jump destination, after the Move
+    emit.emit_push_from_register(r(3)); // reads r3, leaves r10 dead
+    emit.patch_jump(jump_pc, target);
+
+    let old_target = u32::from(target);
+    let bytecode = emit.into_bytecode();
+    let old_len = bytecode.bytes.len();
+
+    let rewritten = elide_moves(bytecode, thin_vec![], Box::default());
+    let out = &rewritten.bytecode.bytes;
+
+    // The 9-byte Move is gone.
+    assert_eq!(out.len(), old_len - 9, "Move bytes should be removed");
+    // Jump address remapped past the deletion.
+    assert_eq!(
+        read_u32(out, u32::from(jump_pc) as usize + 1),
+        old_target - 9,
+        "jump target must be decremented by the removed Move width",
+    );
+    // The instruction now at the remapped target is the PushFromRegister.
+    assert_eq!(
+        Opcode::decode(out[(old_target - 9) as usize]),
+        Opcode::PushFromRegister,
+        "remapped jump must still land on its intended instruction",
+    );
+    // Consumer's `object` operand (2nd register, at +1 + 4) is now `src` (r2).
+    // The consumer follows the 5-byte Jump directly now that the Move is gone.
+    let consumer_pc = u32::from(jump_pc) as usize + 5;
+    assert_eq!(
+        Opcode::decode(out[consumer_pc]),
+        Opcode::SetPropertyByName,
+    );
+    assert_eq!(
+        read_u32(out, consumer_pc + 1 + 4),
+        u32::from(r(2)),
+        "consumer operand must be retargeted from tmp (r10) to src (r2)",
+    );
 }

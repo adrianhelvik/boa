@@ -48,23 +48,47 @@
 //!
 //! The analysis: [`find_safe_move_elisions`] scans a [`Bytecode`] block
 //! and returns every adjacent `Move tmp, src` + `Op …, tmp, …` pair
-//! that can be safely collapsed under the two conditions above.
+//! that can be safely collapsed under the conditions above. Beyond the two
+//! data-flow conditions it also enforces a control-flow condition: neither
+//! instruction may be an incoming jump/handler target (the scan is linear
+//! and has no CFG, so an edge bypassing the `Move` would be invisible).
 //!
-//! The rewriter is **not** wired into [`ByteCompiler::finish`] in this
-//! commit. See the report for the rationale (no `Nop` opcode of the
-//! correct width exists yet; jump-target/source-map fixup hasn't been
-//! audited; and the existing per-call-site fast paths already cover
-//! the hot paths, so a rewriter without bench wins is pure risk).
+//! The rewriter ([`rewrite::elide_moves`]) deletes each dead `Move` and
+//! retargets the consumer, remapping every absolute address (jumps, jump
+//! tables, exception-handler ranges, source-map PCs) through a single
+//! old→new offset map; a debug-only pass re-decodes the result to assert
+//! structural integrity, and unit tests cover the analysis, both guards, and
+//! a byte-level rewrite round-trip.
+//!
+//! It is **not** wired into [`ByteCompiler::finish`]. The rewrite is correct
+//! but shows no measured runtime win: the bytecompiler's per-call-site
+//! receiver-passthrough fast paths already avoid emitting most of the
+//! redundant `Move`s, so the analysis finds few opportunities and running a
+//! rewriter on every [`CodeBlock`](crate::vm::CodeBlock) is risk without
+//! reward. Enable it from `finish` once a benchmark justifies it (and drop the
+//! module-level `allow(dead_code)` below at that point).
 //!
 //! [`ByteCompiler::finish`]: crate::bytecompiler::ByteCompiler::finish
 
-use crate::vm::opcode::{Bytecode, InstructionIterator, Opcode, RegisterOperand};
+// Dormant subsystem: implemented and tested, but not yet called from a live
+// path (see the module docs). Remove when wired into `ByteCompiler::finish`.
+#![allow(dead_code)]
+
+use crate::vm::{
+    Handler,
+    opcode::{Bytecode, InstructionIterator, Opcode, RegisterOperand},
+};
 
 mod operand_info;
+mod rewrite;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use operand_info::{OperandRole, operand_info};
+// The rewriter entry points are exercised by tests and ready for `finish` to
+// call; unused on the non-test build path only because the pass is dormant.
+#[allow(unused_imports)]
+pub(crate) use rewrite::{Rewritten, elide_moves};
 
 /// A safe Move-elision opportunity found by [`find_safe_move_elisions`].
 ///
@@ -122,12 +146,21 @@ impl Eq for Elision {}
 /// rewriter would consume the [`Elision`] list and produce a new
 /// `Bytecode`; see the module docs for why that rewriter is not in this
 /// commit.
-pub(crate) fn find_safe_move_elisions(bytecode: &Bytecode) -> Vec<Elision> {
+pub(crate) fn find_safe_move_elisions(bytecode: &Bytecode, handlers: &[Handler]) -> Vec<Elision> {
     // First pass: collect (pc, opcode, instruction-end-pc, register operands)
     // for every instruction. The forward "next use of dst" scan needs
     // random-access into this list anyway, and decoding twice would be
     // wasteful.
     let decoded = decode_all(bytecode);
+
+    // Every offset some control-flow edge can land on. This analysis walks
+    // the bytecode linearly with no control-flow graph, so it cannot see an
+    // incoming jump/handler edge that reaches `Op` (or `Move`) without going
+    // through the `Move`. On such a path `src` need not equal the snapshot the
+    // `Move` captured, so retargeting `Op` to read `src` would be unsound.
+    // Refuse to elide when either instruction is an entry point.
+    let targets = rewrite::jump_targets(bytecode, handlers);
+    let is_target = |pc: u32| targets.binary_search(&pc).is_ok();
 
     let mut out = Vec::new();
 
@@ -140,6 +173,12 @@ pub(crate) fn find_safe_move_elisions(bytecode: &Bytecode) -> Vec<Elision> {
         let DecodedInstruction::Move { dst, src } = *move_inst else {
             continue;
         };
+
+        // Control-flow soundness: neither the `Move` nor the `Op` may be
+        // reachable except by falling through the `Move`.
+        if is_target(move_pc) || is_target(op_pc) {
+            continue;
+        }
         let DecodedInstruction::Other {
             opcode,
             ref operands,
