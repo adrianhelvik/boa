@@ -442,6 +442,40 @@ mod tests {
         assert_jit_matches_interp("let n = 0, t = 0; while (n < 100) { t += n; n++; } t", 4950);
     }
 
+    /// Honest first JIT perf measurement on a call-free loop (runs entirely in
+    /// native code — no deopt). Run with:
+    /// `cargo test -p boa_engine --features jit --release jit_loop_perf -- --ignored --nocapture`
+    #[test]
+    #[ignore = "perf measurement; run manually with --release --nocapture"]
+    fn jit_loop_perf() {
+        let src = "let s = 0; for (let i = 0; i < 2000000; i++) { s = s + i; } s";
+
+        let time = |jit: bool| -> (i32, std::time::Duration) {
+            let mut c = Context::default();
+            let script =
+                crate::Script::parse(crate::Source::from_bytes(src), None, &mut c).unwrap();
+            // Warm up compilation/caches by evaluating once via the chosen path.
+            let start = std::time::Instant::now();
+            let v = if jit {
+                let mut backend = JitBackend::new();
+                script.evaluate_jit(&mut c, &mut backend).unwrap()
+            } else {
+                script.evaluate(&mut c).unwrap()
+            };
+            (v.as_i32().unwrap_or(0), start.elapsed())
+        };
+
+        let (vi, ti) = time(false);
+        let (vj, tj) = time(true);
+        assert_eq!(vi, vj, "jit and interpreter must agree");
+        eprintln!(
+            "jit_loop_perf: interpreter={:?} jit={:?} ratio={:.3} (result={vi})",
+            ti,
+            tj,
+            tj.as_secs_f64() / ti.as_secs_f64()
+        );
+    }
+
     #[test]
     fn jit_drives_real_context() {
         let mut context = Context::default();
