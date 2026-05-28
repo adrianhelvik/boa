@@ -67,6 +67,23 @@ for a small team.
 - **Stage 1 — baseline call-threading JIT + tiering.** Compile a `CodeBlock`, install
   it, run it on the shared stack. A/B vs interpreter on `fn-call-flat` + a loop bench.
   Target: clearly beat the interpreter; reach ~`--jitless` neighbourhood. *(JIT-1)*
+
+  **Safe-by-construction lowering (decided after the shim layer landed):** do NOT
+  classify opcodes as "JIT-safe" via a denylist — missing one control-flow op is a
+  *miscompile*, the worst failure. Instead, emit a linear sequence of shim calls and,
+  after each, check whether `frame.pc` advanced to the *compile-time-known linear
+  next pc*. Three outcomes per op: (a) break → return the stashed `CompletionRecord`;
+  (b) continue & pc == linear-next → fall through to the next op; (c) continue & pc
+  changed (a jump was taken, or a `Call`/`New` pushed a frame) → **deopt**: return a
+  "resume in interpreter" status and let the caller run `Context::run()` (which
+  resumes from `frame.pc` and naturally runs callees/branches). This needs **no
+  opcode classification and no CFG** for the baseline — any control flow safely falls
+  back to the interpreter. Straight-line leaf code runs entirely in JIT; everything
+  else deopts correctly. The shim should return `(break_flag, new_pc)` (e.g. packed in
+  a `u64`) so the JIT can do the pc check without re-decoding. Generalize to in-JIT
+  jump/call handling (real CFG, inlined calls) only *after* this safe baseline lands
+  and measures a win. Each JIT-compiled op still needs a test proving the deopt path
+  runs for excluded cases (cross-ref the operator-snapshot regression tests).
 - **Stage 2 — inline simple ops + IC-fed specialization.** Inline register moves and
   i32 arithmetic as native IR with type guards + deopt (OSR-out to the interpreter at
   the right `pc`). Then use Boa's inline caches (shape→slot, observed types) to emit
