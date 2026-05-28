@@ -14,7 +14,7 @@
 use crate::Context;
 use crate::vm::CodeBlock;
 use crate::vm::CompletionRecord;
-use crate::vm::opcode::{JIT_OP_SHIMS, Opcode};
+use crate::vm::opcode::{Instruction, JIT_OP_SHIMS, Opcode};
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
@@ -27,6 +27,33 @@ use cranelift_module::{Linkage, Module};
 /// `CompletionRecord` was stashed in `vm.jit_pending`); clear means continue,
 /// with the low bits holding the new `frame.pc`.
 pub(crate) const JIT_BREAK_BIT: u64 = 1 << 63;
+
+/// If `instr` is a **same-frame** branch (no frame push), return its target
+/// `pc`. The JIT can then lower it to a native edge to that target's block.
+///
+/// Safe-by-construction allowlist: only opcodes that set `frame.pc` within the
+/// current frame and never push a new frame. Anything not listed (calls, `new`,
+/// returns, `JumpTable`, generators, …) returns `None` and is handled by the
+/// generic deopt-on-pc-change path — so a missing entry just costs a deopt, it
+/// can never miscompile.
+fn same_frame_jump_target(instr: &Instruction) -> Option<u32> {
+    match instr {
+        Instruction::Jump { address }
+        | Instruction::JumpIfTrue { address, .. }
+        | Instruction::JumpIfFalse { address, .. }
+        | Instruction::JumpIfNotUndefined { address, .. }
+        | Instruction::JumpIfNullOrUndefined { address, .. }
+        | Instruction::JumpIfNotLessThan { address, .. }
+        | Instruction::JumpIfNotLessThanOrEqual { address, .. }
+        | Instruction::JumpIfNotGreaterThan { address, .. }
+        | Instruction::JumpIfNotGreaterThanOrEqual { address, .. }
+        | Instruction::JumpIfNotEqual { address, .. }
+        | Instruction::LogicalAnd { address, .. }
+        | Instruction::LogicalOr { address, .. }
+        | Instruction::Coalesce { address, .. } => Some(address.as_u32()),
+        _ => None,
+    }
+}
 
 /// A JIT backend bound to the host machine.
 ///
@@ -146,14 +173,19 @@ impl JitBackend {
     pub fn compile_codeblock(&mut self, code: &CodeBlock) -> extern "C" fn(*mut Context) -> u64 {
         let ptr = self.module.target_config().pointer_type();
 
-        // Walk the bytecode into (pc, opcode index, linear-next pc) triples.
+        // Walk the bytecode into (pc, opcode index, linear-next pc, jump target)
+        // tuples, and map each instruction's pc to its index for jump edges.
         let bytes = &code.bytecode.bytes;
-        let mut ops: Vec<(usize, usize, usize)> = Vec::new();
+        let mut ops: Vec<(usize, usize, usize, Option<u32>)> = Vec::new();
+        let mut pc_to_index: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         let mut pc = 0usize;
         while pc < bytes.len() {
             let opcode = Opcode::decode(bytes[pc]);
-            let (_instruction, next) = code.bytecode.next_instruction(pc);
-            ops.push((pc, opcode as usize, next));
+            let (instruction, next) = code.bytecode.next_instruction(pc);
+            let target = same_frame_jump_target(&instruction);
+            pc_to_index.insert(pc, ops.len());
+            ops.push((pc, opcode as usize, next, target));
             pc = next;
         }
 
@@ -188,7 +220,7 @@ impl JitBackend {
                 bcx.ins().jump(deopt_block, &[zero.into()]);
             }
 
-            for (i, &(op_pc, op_idx, linear_next)) in ops.iter().enumerate() {
+            for (i, &(op_pc, op_idx, linear_next, jump_target)) in ops.iter().enumerate() {
                 bcx.switch_to_block(op_blocks[i]);
 
                 // Bake the specific shim's address and call it directly.
@@ -207,17 +239,45 @@ impl JitBackend {
                 let cont = bcx.create_block();
                 bcx.ins().brif(masked, break_block, &[], cont, &[]);
 
-                // Continue: did pc advance to the linear next?
+                // Continue: where did `frame.pc` go?
                 bcx.switch_to_block(cont);
+                let fall_block = op_blocks.get(i + 1).copied();
                 let lin = bcx.ins().iconst(types::I64, linear_next as i64);
                 let is_linear = bcx.ins().icmp(IntCC::Equal, status, lin);
-                if let Some(next_block) = op_blocks.get(i + 1) {
-                    bcx.ins()
-                        .brif(is_linear, *next_block, &[], deopt_block, &[status.into()]);
-                } else {
-                    // No more ops: a well-formed function broke before here; if we
-                    // reach this, deopt to the interpreter at the reported pc.
-                    bcx.ins().jump(deopt_block, &[status.into()]);
+
+                // If this is a same-frame jump whose target is an instruction in
+                // this CodeBlock, give it a native edge: pc == linear-next →
+                // fall through; pc == target → branch to the target's block;
+                // anything else → deopt. (Backward targets make loops run in
+                // native code.) For non-jumps, only linear-next is native.
+                let target_block = jump_target
+                    .and_then(|t| pc_to_index.get(&(t as usize)))
+                    .map(|&idx| op_blocks[idx]);
+
+                match (fall_block, target_block) {
+                    (Some(fall), Some(tgt)) => {
+                        let check_target = bcx.create_block();
+                        bcx.ins().brif(is_linear, fall, &[], check_target, &[]);
+                        bcx.switch_to_block(check_target);
+                        let tpc = bcx.ins().iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
+                        bcx.ins()
+                            .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
+                    }
+                    (Some(fall), None) => {
+                        bcx.ins()
+                            .brif(is_linear, fall, &[], deopt_block, &[status.into()]);
+                    }
+                    (None, Some(tgt)) => {
+                        // Last instruction is a jump (e.g. a loop's trailing back-edge).
+                        let tpc = bcx.ins().iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
+                        bcx.ins()
+                            .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
+                    }
+                    (None, None) => {
+                        bcx.ins().jump(deopt_block, &[status.into()]);
+                    }
                 }
             }
 
