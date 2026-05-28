@@ -7,6 +7,45 @@ use crate::{
     vm::opcode::{IndexOperand, Operation, RegisterOperand},
 };
 
+/// IC-hit fast path for [`get_by_name`] that runs without cloning the source
+/// or receiver `JsValue`. Returns `Some(value)` when the inline cache hits on
+/// a non-accessor property — the common case for monomorphic property reads —
+/// and `None` for every situation that needs the slow path (IC miss,
+/// primitive source, getter on the slot, missing prototype).
+///
+/// Splitting this off as a `Context`-borrowing helper lets the call sites
+/// keep `source`/`receiver` as borrowed `&JsValue` from `vm.get_register()`
+/// instead of cloning the underlying `Gc<JsObject>`. The previous
+/// `get_register().clone()` was one ref-count inc + one matching dec per
+/// property read — pure overhead on an IC hit since the value is only ever
+/// borrowed through to `shape()` and `properties().storage[..]`.
+#[inline]
+fn try_ic_read_no_getter(
+    source: &JsValue,
+    context: &Context,
+    ic_index: u32,
+) -> Option<JsValue> {
+    let obj = source.as_object_borrowed()?;
+    let ic = &context.vm.frame().code_block().ic[ic_index as usize];
+    let object_borrowed = obj.borrow();
+    let slot = ic.get(object_borrowed.shape())?;
+    // Getter slots need `&mut Context` to invoke `.call(...)`. The borrows
+    // we hold on `context.vm` (through `source`/`obj`) preclude that, so
+    // hand getter cases to the slow path (which clones once, freeing the
+    // borrow, and then calls the getter).
+    if slot.attributes.has_get() {
+        return None;
+    }
+    let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        let prototype = object_borrowed.shape().prototype()?;
+        let prototype = prototype.borrow();
+        prototype.properties().storage[slot.index as usize].clone()
+    } else {
+        object_borrowed.properties().storage[slot.index as usize].clone()
+    };
+    Some(result)
+}
+
 fn get_by_name<const LENGTH: bool>(
     (dst, source, receiver, index): (RegisterOperand, &JsValue, &JsValue, IndexOperand),
     context: &mut Context,
@@ -173,6 +212,17 @@ impl GetLengthProperty {
         (dst, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
+        // IC-hit no-getter fast path on the borrowed register value, skipping
+        // the `JsValue::clone` (which is a `Gc::clone` for object sources).
+        // Array/string `.length` intrinsics are handled by the slow path —
+        // they require a wider match than the IC's shape check.
+        if let Some(result) = {
+            let source = context.vm.get_register(object.into());
+            try_ic_read_no_getter(source, context, index.into())
+        } {
+            context.vm.set_register(dst.into(), result);
+            return Ok(());
+        }
         let object = context.vm.get_register(object.into()).clone();
         get_by_name::<true>((dst, &object, &object, index), context)
     }
@@ -197,6 +247,15 @@ impl GetPropertyByName {
         (dst, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
+        // IC-hit no-getter fast path: borrow the source register, read the
+        // slot, and write the result — no `Gc::clone` of the source.
+        if let Some(result) = {
+            let source = context.vm.get_register(object.into());
+            try_ic_read_no_getter(source, context, index.into())
+        } {
+            context.vm.set_register(dst.into(), result);
+            return Ok(());
+        }
         let object = context.vm.get_register(object.into()).clone();
         get_by_name::<false>((dst, &object, &object, index), context)
     }
@@ -226,6 +285,16 @@ impl GetPropertyByNameWithThis {
         ),
         context: &mut Context,
     ) -> JsResult<()> {
+        // IC-hit no-getter fast path: no need to clone `receiver` either,
+        // since `receiver` is only consumed when invoking a getter (which
+        // forces the slow path).
+        if let Some(result) = {
+            let source = context.vm.get_register(value.into());
+            try_ic_read_no_getter(source, context, index.into())
+        } {
+            context.vm.set_register(dst.into(), result);
+            return Ok(());
+        }
         let receiver = context.vm.get_register(receiver.into()).clone();
         let object = context.vm.get_register(value.into()).clone();
         get_by_name::<false>((dst, &object, &receiver, index), context)
