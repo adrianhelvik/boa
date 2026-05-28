@@ -104,6 +104,9 @@ pub mod symbol;
 pub mod value;
 pub mod vm;
 
+#[cfg(feature = "jit")]
+pub mod jit;
+
 mod host_defined;
 mod sys;
 
