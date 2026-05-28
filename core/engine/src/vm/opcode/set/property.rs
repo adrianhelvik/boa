@@ -11,6 +11,48 @@ use crate::{
 };
 use boa_macros::js_str;
 
+/// IC-hit fast path for [`set_by_name`] that writes a plain data slot through
+/// a borrowed target, skipping the `Gc::clone` of the target object the
+/// `get_register().clone()` at the call sites would otherwise perform. The
+/// `value` is moved into the slot (it has to be owned to be stored regardless).
+///
+/// Returns `Ok(())` when the write happened; `Err(value)` hands the value back
+/// so the caller can take the slow path (accessor slot, IC miss, primitive
+/// target, or missing prototype) without re-cloning it.
+#[inline]
+fn try_ic_write_no_setter(
+    target: &JsValue,
+    value: JsValue,
+    context: &Context,
+    ic_index: u32,
+) -> Result<(), JsValue> {
+    let Some(obj) = target.as_object_borrowed() else {
+        return Err(value);
+    };
+    let ic = &context.vm.frame().code_block().ic[ic_index as usize];
+    let object_borrowed = obj.borrow();
+    let Some(slot) = ic.get(object_borrowed.shape()) else {
+        return Err(value);
+    };
+    // Accessor slots invoke a setter that re-enters the VM with `&mut Context`,
+    // which the borrows we hold preclude — hand those to the slow path.
+    if slot.attributes.is_accessor_descriptor() {
+        return Err(value);
+    }
+    let slot_index = slot.index as usize;
+    if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        let Some(prototype) = object_borrowed.shape().prototype() else {
+            return Err(value);
+        };
+        drop(object_borrowed);
+        prototype.borrow_mut().properties_mut().storage[slot_index] = value;
+    } else {
+        drop(object_borrowed);
+        obj.borrow_mut().properties_mut().storage[slot_index] = value;
+    }
+    Ok(())
+}
+
 fn set_by_name(
     value: RegisterOperand,
     value_object: &JsValue,
@@ -135,6 +177,17 @@ impl SetPropertyByName {
         (value, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
+        // Fast path: write through a borrowed target, no `Gc::clone` of it.
+        let value_clone = context.vm.get_register(value.into()).clone();
+        let pending = {
+            let target = context.vm.get_register(object.into());
+            try_ic_write_no_setter(target, value_clone, context, index.into())
+        };
+        if pending.is_ok() {
+            return Ok(());
+        }
+        // Slow path: accessor/IC-miss/primitive target. `set_by_name`
+        // re-reads the value register (one extra clone on this cold path).
         let object = context.vm.get_register(object.into()).clone();
         set_by_name(value, &object, &object, index, context)
     }
@@ -164,6 +217,16 @@ impl SetPropertyByNameWithThis {
         ),
         context: &mut Context,
     ) -> JsResult<()> {
+        // Fast path: no getter/setter ⇒ `receiver` is unused, so skip both
+        // the target and receiver clones on the borrowed IC-hit write.
+        let value_clone = context.vm.get_register(value.into()).clone();
+        let pending = {
+            let target = context.vm.get_register(object.into());
+            try_ic_write_no_setter(target, value_clone, context, index.into())
+        };
+        if pending.is_ok() {
+            return Ok(());
+        }
         let value_object = context.vm.get_register(object.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
         set_by_name(value, &value_object, &receiver, index, context)
