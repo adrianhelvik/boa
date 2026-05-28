@@ -111,6 +111,13 @@ pub struct Vm {
 
     pub(crate) shadow_stack: ShadowStack,
 
+    /// Where a JIT opcode shim stashes the [`CompletionRecord`] when an op
+    /// returns `ControlFlow::Break` (the value can't cross the C ABI by return).
+    /// The JIT trampoline retrieves it after a shim reports the break status.
+    #[cfg(feature = "jit")]
+    #[allow(dead_code, reason = "consumed by the JIT compiler (JIT-1, in progress)")]
+    pub(crate) jit_pending: Option<CompletionRecord>,
+
     #[cfg(feature = "trace")]
     pub(crate) trace: bool,
     #[cfg(feature = "trace")]
@@ -440,6 +447,8 @@ impl Vm {
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),
+            #[cfg(feature = "jit")]
+            jit_pending: None,
             #[cfg(feature = "trace")]
             trace: false,
             #[cfg(feature = "trace")]
