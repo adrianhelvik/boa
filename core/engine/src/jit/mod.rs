@@ -347,6 +347,41 @@ mod tests {
         assert_eq!(interp.as_i32(), jit.as_i32());
     }
 
+    /// Run `src` through both the interpreter and the JIT and assert identical
+    /// `i32` results. Exercises the JIT execution + deopt-to-interpreter hand-off
+    /// across program shapes (the JIT deopts on control flow today, so these
+    /// confirm the hand-off is correct before native loops/calls are added).
+    fn assert_jit_matches_interp(src: &str, expected: i32) {
+        let mut c1 = Context::default();
+        let s1 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1)
+            .expect("parse");
+        let interp = s1.evaluate(&mut c1).expect("interpret");
+
+        let mut c2 = Context::default();
+        let s2 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2)
+            .expect("parse");
+        let mut backend = JitBackend::new();
+        let jit = s2.evaluate_jit(&mut c2, &mut backend).expect("jit");
+
+        assert_eq!(interp.as_i32(), Some(expected), "interpreter result for: {src}");
+        assert_eq!(jit.as_i32(), Some(expected), "jit result for: {src}");
+    }
+
+    #[test]
+    fn jit_deopt_handoff_across_shapes() {
+        // Loop (backward jumps).
+        assert_jit_matches_interp("let s = 0; for (let i = 0; i < 10; i++) { s += i; } s", 45);
+        // Conditional (forward jumps).
+        assert_jit_matches_interp("let x = 7; let y = x > 5 ? 100 : 1; y", 100);
+        // Nested calls + recursion.
+        assert_jit_matches_interp(
+            "function fib(n){ return n < 2 ? n : fib(n-1) + fib(n-2); } fib(10)",
+            55,
+        );
+        // While loop accumulating.
+        assert_jit_matches_interp("let n = 0, t = 0; while (n < 100) { t += n; n++; } t", 4950);
+    }
+
     #[test]
     fn jit_drives_real_context() {
         let mut context = Context::default();
