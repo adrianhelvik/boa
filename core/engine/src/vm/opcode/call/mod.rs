@@ -272,6 +272,20 @@ impl CallSpread {
                 .into());
         };
 
+        // Same ordinary-function fast path as `Call` (see `Call::operation`):
+        // spread calls route through the identical `function_call` entry, so an
+        // `OrdinaryFunction` callee can skip the vtable indirect + `CallValue`
+        // round-trip. Non-ordinary callees fall through unchanged.
+        if object.is::<OrdinaryFunction>() {
+            return crate::builtins::function::function_call(
+                &object,
+                argument_count,
+                &mut InternalMethodCallContext::new(context),
+            )?
+            .resolve(context)
+            .map(drop);
+        }
+
         object.__call__(argument_count).resolve(context)?;
         Ok(())
     }
