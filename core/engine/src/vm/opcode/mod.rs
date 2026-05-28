@@ -458,9 +458,15 @@ macro_rules! generate_opcodes {
 
         // `extern "C"` shims wrapping each opcode handler, so the Cranelift JIT
         // can call a specific handler directly (the `ControlFlow<CompletionRecord>`
-        // return value can't cross the C ABI). Each returns 0 to continue, or 1
-        // if the op broke — in which case the `CompletionRecord` is stashed in
-        // `vm.jit_pending` for the JIT trampoline to retrieve.
+        // return value can't cross the C ABI).
+        //
+        // Encoding of the returned `u64` (see `jit::JIT_BREAK_BIT`):
+        // - high bit set  => the op broke; the `CompletionRecord` is stashed in
+        //   `vm.jit_pending` for the JIT trampoline to retrieve.
+        // - high bit clear => continue; the low bits are the new `frame.pc`. The
+        //   compiler compares this to the statically-known linear-next pc: equal =>
+        //   fall through; different (a jump was taken, or a Call/New pushed a frame,
+        //   making the current frame's pc 0) => safely deopt to the interpreter.
         #[cfg(feature = "jit")]
         $(
             pastey::paste! {
@@ -470,14 +476,14 @@ macro_rules! generate_opcodes {
                 pub(crate) unsafe extern "C" fn [<jit_shim_ $Variant:snake>](
                     context: *mut Context,
                     pc: u32,
-                ) -> u32 {
+                ) -> u64 {
                     // SAFETY: upheld by the JIT trampoline calling this shim.
                     let context = unsafe { &mut *context };
                     match [<handle_ $Variant:snake>](context, pc as usize) {
-                        ControlFlow::Continue(()) => 0,
+                        ControlFlow::Continue(()) => u64::from(context.vm.frame().pc),
                         ControlFlow::Break(record) => {
                             context.vm.jit_pending = Some(record);
-                            1
+                            crate::jit::JIT_BREAK_BIT
                         }
                     }
                 }
@@ -487,7 +493,7 @@ macro_rules! generate_opcodes {
         /// Table of `extern "C"` opcode shims, indexed by opcode, for the JIT.
         #[cfg(feature = "jit")]
         #[allow(dead_code, reason = "consumed by the JIT compiler (JIT-1, in progress)")]
-        pub(crate) const JIT_OP_SHIMS: [unsafe extern "C" fn(*mut Context, u32) -> u32; 256] = {
+        pub(crate) const JIT_OP_SHIMS: [unsafe extern "C" fn(*mut Context, u32) -> u64; 256] = {
             [
                 $(
                     pastey::paste! { [<jit_shim_ $Variant:snake>] },
