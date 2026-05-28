@@ -13,6 +13,7 @@
 
 use crate::Context;
 use crate::vm::CodeBlock;
+use crate::vm::CompletionRecord;
 use crate::vm::opcode::{JIT_OP_SHIMS, Opcode};
 
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -248,6 +249,35 @@ impl JitBackend {
         // the code for as long as the returned pointer is used.
         unsafe { std::mem::transmute::<*const u8, extern "C" fn(*mut Context) -> u64>(code_ptr) }
     }
+
+    /// Compile `code` and run it against the current (already-entered) frame on
+    /// `context`, returning the resulting [`CompletionRecord`].
+    ///
+    /// The caller must have pushed the frame for `code` (as the interpreter does
+    /// before [`Context::run`]). If the JIT-compiled code deopts (hits any control
+    /// flow), execution transparently continues in the interpreter from the
+    /// current `frame.pc`, so the result is always correct.
+    ///
+    /// # Panics
+    /// Panics if Cranelift codegen fails.
+    #[must_use]
+    pub fn run_codeblock(&mut self, code: &CodeBlock, context: &mut Context) -> CompletionRecord {
+        let compiled = self.compile_codeblock(code);
+        // SAFETY: `context` is a valid exclusive borrow for the duration of the
+        // call; the compiled code only touches it through the `extern "C"` shims.
+        let status = compiled(std::ptr::from_mut(context));
+        if status & JIT_BREAK_BIT != 0 {
+            context
+                .vm
+                .jit_pending
+                .take()
+                .expect("a break status must have stashed a completion record")
+        } else {
+            // The JIT deopted at `frame.pc`; finish in the interpreter, which
+            // resumes from there (running any branch taken or callee pushed).
+            context.run()
+        }
+    }
 }
 
 impl Default for JitBackend {
@@ -290,6 +320,31 @@ mod tests {
         let code = script.codeblock(&mut context).expect("codeblock");
         let mut backend = JitBackend::new();
         let _compiled = backend.compile_codeblock(&code);
+    }
+
+    #[test]
+    fn jit_executes_script_matches_interpreter() {
+        // End-to-end: run a real script through the JIT trampoline and confirm
+        // the result matches the interpreter exactly. The JIT runs native code
+        // for the prologue, deopts on the first control flow (the `add` call),
+        // and the interpreter finishes — so this exercises the compiled code,
+        // the break/deopt status protocol, and the trampoline's interpreter
+        // hand-off, all producing the correct value.
+        let src = "function add(a, b) { return a + b; } let r = add(2, 3) + 10; r";
+
+        let mut c1 = Context::default();
+        let s1 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1)
+            .expect("parse");
+        let interp = s1.evaluate(&mut c1).expect("interpret");
+
+        let mut c2 = Context::default();
+        let s2 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2)
+            .expect("parse");
+        let mut backend = JitBackend::new();
+        let jit = s2.evaluate_jit(&mut c2, &mut backend).expect("jit");
+
+        assert_eq!(jit.as_i32(), Some(15));
+        assert_eq!(interp.as_i32(), jit.as_i32());
     }
 
     #[test]

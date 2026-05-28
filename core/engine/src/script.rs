@@ -182,6 +182,24 @@ impl Script {
         record.consume()
     }
 
+    /// Like [`Script::evaluate`], but runs the script through the experimental
+    /// Cranelift JIT tier (`jit` feature). The JIT deopts to the interpreter on
+    /// any control flow, so the result is identical to [`Script::evaluate`].
+    #[cfg(feature = "jit")]
+    pub fn evaluate_jit(
+        &self,
+        context: &mut Context,
+        backend: &mut crate::jit::JitBackend,
+    ) -> JsResult<JsValue> {
+        self.prepare_run(context)?;
+        let code = self.codeblock(context)?;
+        let record = backend.run_codeblock(&code, context);
+
+        context.vm.pop_frame();
+
+        record.consume()
+    }
+
     /// Evaluates this script and returns its result, periodically yielding to the executor
     /// in order to avoid blocking the current thread.
     ///
