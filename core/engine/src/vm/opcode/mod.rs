@@ -467,8 +467,12 @@ macro_rules! generate_opcodes {
         //   compiler compares this to the statically-known linear-next pc: equal =>
         //   fall through; different (a jump was taken, or a Call/New pushed a frame,
         //   making the current frame's pc 0) => safely deopt to the interpreter.
-        #[cfg(feature = "jit")]
         $(
+            // The cfg must sit *inside* the repetition: an attribute placed
+            // before `$(...)*` only attaches to the first expansion, leaving the
+            // remaining shims (which reference the jit-gated `jit_pending` /
+            // `crate::jit`) compiled in non-jit builds.
+            #[cfg(feature = "jit")]
             pastey::paste! {
                 /// # Safety
                 /// `context` must be a valid pointer to an exclusively-borrowed `Context`.
