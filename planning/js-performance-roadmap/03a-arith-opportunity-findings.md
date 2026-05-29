@@ -1,5 +1,11 @@
 # 03a — Adaptive-arithmetic opportunity measurement (findings)
 
+> **UPDATE — superseded by `03b`.** The quickening lever this GO recommended was
+> implemented in full and measured an **8% regression** (see
+> `03b-arith-quickening-negative-result.md`). The opportunity below is real, but
+> the PEP-659 *mechanism* doesn't fit Boa's already-inlined interpreter — the
+> residual per-op cost is opcode dispatch, not type dispatch. Read 03b first.
+
 **Status:** measurement complete. **Verdict: GO** — the opportunity is large,
 hot, and overwhelmingly monomorphic on real workloads. This is the *opposite* of
 the move-elision case (19 sites / 1017 blocks → reverted).
