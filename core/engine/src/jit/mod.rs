@@ -250,18 +250,20 @@ impl JitBackend {
                 // fall through; pc == target → branch to the target's block;
                 // anything else → deopt. (Backward targets make loops run in
                 // native code.) For non-jumps, only linear-next is native.
-                let target_block = jump_target
-                    .and_then(|t| pc_to_index.get(&(t as usize)))
-                    .map(|&idx| op_blocks[idx]);
+                // Carry the jump target's pc alongside its block so the branch
+                // arms can use it without re-unwrapping `jump_target`.
+                let target_block = jump_target.and_then(|t| {
+                    pc_to_index
+                        .get(&(t as usize))
+                        .map(|&idx| (t, op_blocks[idx]))
+                });
 
                 match (fall_block, target_block) {
-                    (Some(fall), Some(tgt)) => {
+                    (Some(fall), Some((target_pc, tgt))) => {
                         let check_target = bcx.create_block();
                         bcx.ins().brif(is_linear, fall, &[], check_target, &[]);
                         bcx.switch_to_block(check_target);
-                        let tpc = bcx
-                            .ins()
-                            .iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let tpc = bcx.ins().iconst(types::I64, i64::from(target_pc));
                         let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
                         bcx.ins()
                             .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
@@ -270,11 +272,9 @@ impl JitBackend {
                         bcx.ins()
                             .brif(is_linear, fall, &[], deopt_block, &[status.into()]);
                     }
-                    (None, Some(tgt)) => {
+                    (None, Some((target_pc, tgt))) => {
                         // Last instruction is a jump (e.g. a loop's trailing back-edge).
-                        let tpc = bcx
-                            .ins()
-                            .iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let tpc = bcx.ins().iconst(types::I64, i64::from(target_pc));
                         let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
                         bcx.ins()
                             .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
@@ -325,7 +325,11 @@ impl JitBackend {
     /// # Panics
     /// Panics if Cranelift codegen fails.
     #[must_use]
-    pub fn run_codeblock(&mut self, code: &CodeBlock, context: &mut Context) -> CompletionRecord {
+    pub(crate) fn run_codeblock(
+        &mut self,
+        code: &CodeBlock,
+        context: &mut Context,
+    ) -> CompletionRecord {
         let compiled = self.compile_codeblock(code);
         // SAFETY: `context` is a valid exclusive borrow for the duration of the
         // call; the compiled code only touches it through the `extern "C"` shims.

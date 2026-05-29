@@ -818,6 +818,7 @@ impl Context {
 
 impl Context {
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
@@ -826,6 +827,7 @@ impl Context {
     }
 
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,

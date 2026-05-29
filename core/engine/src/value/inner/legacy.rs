@@ -258,6 +258,7 @@ impl EnumBasedValue {
     /// The inner value must be a valid [`Self::Object`].
     #[must_use]
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub(crate) unsafe fn as_object_unchecked(&self) -> ManuallyDrop<JsObject> {
         match self {
             Self::Object(value) => {

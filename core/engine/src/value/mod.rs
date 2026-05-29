@@ -137,6 +137,7 @@ impl std::ops::Deref for JsObjectBorrow<'_> {
     type Target = JsObject;
 
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn deref(&self) -> &JsObject {
         &self.inner
     }
