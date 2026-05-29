@@ -164,10 +164,9 @@ impl SetNameGlobal {
             if let Some(slot) = ic.get(object_borrowed.shape()) {
                 // Accessor or prototype-bound slots take the cold path so the
                 // setter and prototype chain semantics are preserved exactly.
-                if !slot
-                    .attributes
-                    .intersects(SlotAttributes::PROTOTYPE | SlotAttributes::GET | SlotAttributes::SET)
-                    && slot.attributes.contains(SlotAttributes::WRITABLE)
+                if !slot.attributes.intersects(
+                    SlotAttributes::PROTOTYPE | SlotAttributes::GET | SlotAttributes::SET,
+                ) && slot.attributes.contains(SlotAttributes::WRITABLE)
                 {
                     let slot_index = slot.index as usize;
                     drop(object_borrowed);
@@ -187,8 +186,7 @@ impl SetNameGlobal {
             let receiver = object.clone().into();
 
             let context_inner = &mut InternalMethodPropertyContext::new(context);
-            let succeeded =
-                object.__set__(key.clone(), value.clone(), receiver, context_inner)?;
+            let succeeded = object.__set__(key.clone(), value.clone(), receiver, context_inner)?;
             if !succeeded && strict {
                 return Err(JsNativeError::typ()
                     .with_message(format!("cannot set non-writable property: {key}"))

@@ -1032,8 +1032,12 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.ic.push(InlineCache::new(name.clone()));
 
         if let Some(receiver) = receiver {
-            self.bytecode
-                .emit_get_property_by_name_with_this(dst, receiver, value, ic_index.into());
+            self.bytecode.emit_get_property_by_name_with_this(
+                dst,
+                receiver,
+                value,
+                ic_index.into(),
+            );
         } else if name == &StaticJsStrings::LENGTH {
             self.bytecode
                 .emit_get_length_property(dst, value, ic_index.into());
@@ -1077,8 +1081,12 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.ic.push(InlineCache::new(name.clone()));
 
         if let Some(receiver) = receiver {
-            self.bytecode
-                .emit_set_property_by_name_with_this(value, receiver, object, ic_index.into());
+            self.bytecode.emit_set_property_by_name_with_this(
+                value,
+                receiver,
+                object,
+                ic_index.into(),
+            );
         } else {
             self.bytecode
                 .emit_set_property_by_name(value, object, ic_index.into());
@@ -1592,12 +1600,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                         let sym = name.sym();
                         self.compile_expr_operand_stable(access.target(), |c, obj_op| {
                             let value = expr_fn(c);
-                            c.emit_set_property_by_name_op(
-                                value.variable(),
-                                None,
-                                obj_op,
-                                sym,
-                            );
+                            c.emit_set_property_by_name_op(value.variable(), None, obj_op, sym);
                         });
                     }
                     PropertyAccessField::Expr(expr) => {

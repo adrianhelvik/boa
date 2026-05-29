@@ -20,11 +20,7 @@ use crate::{
 /// property read — pure overhead on an IC hit since the value is only ever
 /// borrowed through to `shape()` and `properties().storage[..]`.
 #[inline]
-fn try_ic_read_no_getter(
-    source: &JsValue,
-    context: &Context,
-    ic_index: u32,
-) -> Option<JsValue> {
+fn try_ic_read_no_getter(source: &JsValue, context: &Context, ic_index: u32) -> Option<JsValue> {
     let obj = source.as_object_borrowed()?;
     let ic = &context.vm.frame().code_block().ic[ic_index as usize];
     let object_borrowed = obj.borrow();
@@ -91,10 +87,11 @@ fn get_by_name<const LENGTH: bool>(
 
             drop(object_borrowed);
             if slot.attributes.has_get() && result.is_object() {
-                result = result
-                    .as_object()
-                    .expect("should contain getter")
-                    .call(receiver, &[], context)?;
+                result = result.as_object().expect("should contain getter").call(
+                    receiver,
+                    &[],
+                    context,
+                )?;
             }
             context.vm.set_register(dst.into(), result);
             return Ok(());

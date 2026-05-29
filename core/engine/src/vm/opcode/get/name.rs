@@ -43,12 +43,9 @@ impl GetName {
                         Environment::Object(_) => None,
                     }
                 }
-                BindingLocatorScope::GlobalDeclarative => context
-                    .vm
-                    .frame()
-                    .realm
-                    .environment()
-                    .get(binding_index),
+                BindingLocatorScope::GlobalDeclarative => {
+                    context.vm.frame().realm.environment().get(binding_index)
+                }
                 BindingLocatorScope::GlobalObject => None,
             };
             if let Some(result) = result_opt {
