@@ -1,9 +1,113 @@
 use crate::{
-    Context, JsResult, JsValue,
-    vm::opcode::{Operation, RegisterOperand},
+    Context, JsResult, JsValue, JsVariant,
+    vm::opcode::{Opcode, Operation, RegisterOperand},
 };
 
+use super::quickened::QUICKEN_THRESHOLD;
+
+/// Size in bytes of a 3-RegisterOperand arithmetic instruction:
+/// 1 (opcode byte) + 3 × 4 (u32 RegisterOperands).
+///
+/// Used to recover the opcode PC from `frame.pc` (which has already been
+/// advanced to `next_pc`) inside the quickening logic.
+const ARITH_INSN_SIZE: usize = 1 + 3 * 4;
+
 macro_rules! implement_bin_ops {
+    // -----------------------------------------------------------------------
+    // Quickenable variant: Add/Sub/Mul with Int and F64 specialized forms.
+    // After `QUICKEN_THRESHOLD` monomorphic observations the opcode byte is
+    // rewritten to the appropriate specialized variant (`$int_op` or `$f64_op`).
+    // -----------------------------------------------------------------------
+    ($name:ident, $op:ident, $kind:ident, $ovf:expr, $doc_string:literal,
+     $fast_fn:ident, quicken: $int_op:ident, $f64_op:ident) => {
+        #[doc= concat!("`", stringify!($name), "` implements the `OpCode` Operation for `Opcode::", stringify!($name), "`\n")]
+        #[doc= "\n"]
+        #[doc="Operation:\n"]
+        #[doc= concat!(" - ", $doc_string)]
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) struct $name;
+
+        impl $name {
+            #[inline]
+            pub(crate) fn operation(
+                (dst, lhs, rhs): (RegisterOperand, RegisterOperand, RegisterOperand),
+                context: &mut Context,
+            ) -> JsResult<()> {
+                let lhs = context.vm.get_register(lhs.into());
+                let rhs = context.vm.get_register(rhs.into());
+
+                // Off-by-default opportunity instrumentation.
+                #[cfg(feature = "arith-instrument")]
+                {
+                    let class = lhs.classify_arith_pair(rhs, $ovf);
+                    let frame = context.vm.frame();
+                    let code_block: usize =
+                        std::ptr::addr_of!(*frame.code_block).cast::<()>() as usize;
+                    let pc = frame.pc;
+                    crate::vm::arith_instrument::record(
+                        code_block,
+                        pc,
+                        crate::vm::arith_instrument::ArithKind::$kind,
+                        class,
+                    );
+                }
+
+                // Fast path: try numeric operation without cloning.
+                if let Some(value) = JsValue::$fast_fn(lhs, rhs) {
+                    // --- Quickening counter logic ---
+                    // `frame.pc` is already `next_pc` here; recover the opcode PC.
+                    let next_pc = context.vm.frame().pc as usize;
+                    let opcode_pc = next_pc.wrapping_sub(ARITH_INSN_SIZE);
+                    if let Some(counter_cell) =
+                        context.vm.frame().code_block.quicken_state.get(opcode_pc)
+                    {
+                        let count = counter_cell.get();
+                        if count < QUICKEN_THRESHOLD {
+                            // Determine which variant to specialize to.
+                            let specialized: Opcode = match (lhs.variant(), rhs.variant()) {
+                                (JsVariant::Integer32(_), JsVariant::Integer32(_)) => {
+                                    Opcode::$int_op
+                                }
+                                _ => Opcode::$f64_op,
+                            };
+                            let new_count = count.wrapping_add(1);
+                            counter_cell.set(new_count);
+                            if new_count >= QUICKEN_THRESHOLD {
+                                // Specialize: rewrite the opcode byte in place.
+                                context
+                                    .vm
+                                    .frame()
+                                    .code_block
+                                    .bytecode
+                                    .set_byte(opcode_pc, specialized as u8);
+                            }
+                        }
+                    }
+                    // --- end quickening logic ---
+
+                    context.vm.set_register(dst.into(), value.into());
+                    return Ok(());
+                }
+
+                // Slow path: clone and use full method with type coercion.
+                let lhs = lhs.clone();
+                let rhs = rhs.clone();
+                let value = lhs.$op(&rhs, context)?;
+                context.vm.set_register(dst.into(), value.into());
+                Ok(())
+            }
+        }
+
+        impl Operation for $name {
+            const NAME: &'static str = stringify!($name);
+            const INSTRUCTION: &'static str = stringify!("INST - " + $name);
+            const COST: u8 = 2;
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Standard variant: all other binary ops (no quickening).
+    // -----------------------------------------------------------------------
     ($name:ident, $op:ident, $kind:ident, $ovf:expr, $doc_string:literal $(, $fast_fn: ident)?) => {
         #[doc= concat!("`", stringify!($name), "` implements the `OpCode` Operation for `Opcode::", stringify!($name), "`\n")]
         #[doc= "\n"]
@@ -75,7 +179,9 @@ implement_bin_ops!(
     Add,
     |x: i32, y: i32| x.checked_add(y).is_none(),
     "Binary `+` operator.",
-    add_fast
+    add_fast,
+    quicken: AddInt,
+    AddF64
 );
 implement_bin_ops!(
     Sub,
@@ -83,7 +189,9 @@ implement_bin_ops!(
     Sub,
     |x: i32, y: i32| x.checked_sub(y).is_none(),
     "Binary `-` operator.",
-    sub_fast
+    sub_fast,
+    quicken: SubInt,
+    SubF64
 );
 implement_bin_ops!(
     Mul,
@@ -94,7 +202,9 @@ implement_bin_ops!(
         .as_ref()
         .is_none_or(|v| !(*v != 0 || i32::min(x, y) >= 0)),
     "Binary `*` operator.",
-    mul_fast
+    mul_fast,
+    quicken: MulInt,
+    MulF64
 );
 implement_bin_ops!(
     Div,

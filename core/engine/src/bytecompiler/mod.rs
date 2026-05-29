@@ -2831,6 +2831,11 @@ impl<'ctx> ByteCompiler<'ctx> {
 
         let source_map_entries = self.source_map_builder.build(final_bytecode_len.as_u32());
 
+        // Allocate the quicken_state parallel array (one Cell<u8> per bytecode
+        // byte, all zero — meaning "not yet observed").
+        let bytecode_len = final_bytecode_len.as_u32() as usize;
+        let quicken_state: Box<[Cell<u8>]> = (0..bytecode_len).map(|_| Cell::new(0u8)).collect();
+
         CodeBlock {
             length: self.length,
             register_count,
@@ -2838,6 +2843,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             parameter_length: self.params.as_ref().len() as u32,
             mapped_arguments_binding_indices,
             bytecode: self.bytecode.into_bytecode(),
+            quicken_state,
             constants: self.constants,
             bindings: self.bindings.into_boxed_slice(),
             handlers: self.handlers,

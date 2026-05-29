@@ -18,7 +18,7 @@ use crate::{
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
 use args::{Argument, read};
-use std::ops::ControlFlow;
+use std::{cell::Cell, ops::ControlFlow};
 use thin_vec::ThinVec;
 
 mod args;
@@ -145,9 +145,8 @@ impl BytecodeEmitter {
 
     /// Convert the [`BytecodeEmitter`] into a [`Bytecode`] instance.
     pub(crate) fn into_bytecode(self) -> Bytecode {
-        Bytecode {
-            bytes: self.bytes.into_boxed_slice(),
-        }
+        let bytes: Box<[Cell<u8>]> = self.bytes.into_iter().map(Cell::new).collect();
+        Bytecode { bytes }
     }
 
     /// Get the location of the next opcode in the bytecode.
@@ -181,10 +180,63 @@ impl BytecodeEmitter {
     }
 }
 
-#[derive(Clone, Debug, Default)]
 /// The bytecode representation of a codeblock.
+///
+/// Opcode bytes at quickened sites may be overwritten in-place at runtime to
+/// specialize them (PEP-659-style adaptive quickening).  `Cell<u8>` provides
+/// interior mutability through a shared `&Bytecode` reference — sound because
+/// Boa's VM is strictly single-threaded (the GC is `!Sync`).
+#[derive(Debug, Default)]
 pub(crate) struct Bytecode {
-    pub(crate) bytes: Box<[u8]>,
+    pub(crate) bytes: Box<[Cell<u8>]>,
+}
+
+impl Clone for Bytecode {
+    fn clone(&self) -> Self {
+        // Produce a deep copy of the byte content.  The specialization state
+        // (which opcodes have been quickened) is deliberately *not* cloned so
+        // the copy starts fresh.  This matches the semantics of `CodeBlock`
+        // clone: evaluation state is not carried across.
+        let bytes: Box<[Cell<u8>]> = self.bytes.iter().map(|b| Cell::new(b.get())).collect();
+        Self { bytes }
+    }
+}
+
+impl Bytecode {
+    /// Read the opcode byte at `pc`.  Identical cost to a `[u8]` index on
+    /// almost all platforms (`Cell::get` compiles to a plain load).
+    #[inline(always)]
+    pub(crate) fn get_byte(&self, pc: usize) -> Option<u8> {
+        self.bytes.get(pc).map(Cell::get)
+    }
+
+    /// Overwrite the opcode byte at `pc`.  Must only be called from the VM
+    /// dispatch loop (which holds `&mut Context`, proving single-threaded
+    /// exclusive access).
+    #[inline(always)]
+    pub(crate) fn set_byte(&self, pc: usize, byte: u8) {
+        if let Some(cell) = self.bytes.get(pc) {
+            cell.set(byte);
+        }
+    }
+
+    /// Returns a raw byte slice that can be passed to the operand decode
+    /// helpers in `args.rs`.  The slice is valid for reads throughout the
+    /// current opcode handler (Boa is single-threaded, no concurrent writes
+    /// can happen while a handler holds `&Context`).
+    ///
+    /// # Safety
+    ///
+    /// The returned slice must not be held across any call that may mutate
+    /// the bytecode (i.e. across the quickening write in a handler body).
+    /// Within a single handler invocation this is always safe.
+    #[inline(always)]
+    pub(crate) fn as_u8_slice(&self) -> &[u8] {
+        // SAFETY: Cell<u8> is repr(transparent) over u8, so the memory
+        // layout is identical.  We only return a shared reference, and no
+        // aliased `&mut [u8]` exists (Boa is single-threaded).
+        unsafe { std::slice::from_raw_parts(self.bytes.as_ptr().cast::<u8>(), self.bytes.len()) }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -432,7 +484,7 @@ macro_rules! generate_opcodes {
                 #[inline(always)]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
-                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
+                    let bytes = context.vm.frame().code_block.bytecode.as_u8_slice();
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
@@ -447,7 +499,7 @@ macro_rules! generate_opcodes {
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
-                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
+                    let bytes = context.vm.frame().code_block.bytecode.as_u8_slice();
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
@@ -539,7 +591,7 @@ macro_rules! generate_opcodes {
         impl Bytecode {
             #[allow(unused_parens)]
             pub(crate) fn next_instruction(&self, pc: usize) -> (Instruction, usize) {
-                let bytes = &self.bytes;
+                let bytes = self.as_u8_slice();
                 let opcode = Opcode::decode(bytes[pc]);
 
                 match opcode {
@@ -594,8 +646,7 @@ impl Iterator for InstructionIterator<'_> {
             return None;
         }
 
-        let bytes = &self.bytes.bytes;
-        let opcode = Opcode::decode(bytes[self.pc]);
+        let opcode = Opcode::decode(self.bytes.bytes[self.pc].get());
         // Get instruction and determine how much to advance pc
         let (instruction, read_size) = self.bytes.next_instruction(self.pc);
         self.pc = read_size;
@@ -2215,18 +2266,60 @@ generate_opcodes! {
     ///   - Output: dst
     CreateUnmappedArgumentsObject { dst: RegisterOperand },
 
-    /// Reserved [`Opcode`].
-    Reserved1 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved2 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved3 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved4 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved5 => Reserved,
-    /// Reserved [`Opcode`].
-    Reserved6 => Reserved,
+    /// Quickened `+` for i32 operands — deopt to [`Opcode::Add`] on type mismatch or overflow.
+    ///
+    /// Same encoding as [`Opcode::Add`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    AddInt { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
+    /// Quickened `+` for f64 operands — deopt to [`Opcode::Add`] on type mismatch.
+    ///
+    /// Same encoding as [`Opcode::Add`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    AddF64 { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
+    /// Quickened `-` for i32 operands — deopt to [`Opcode::Sub`] on type mismatch or overflow.
+    ///
+    /// Same encoding as [`Opcode::Sub`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    SubInt { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
+    /// Quickened `-` for f64 operands — deopt to [`Opcode::Sub`] on type mismatch.
+    ///
+    /// Same encoding as [`Opcode::Sub`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    SubF64 { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
+    /// Quickened `*` for i32 operands — deopt to [`Opcode::Mul`] on type mismatch or overflow.
+    ///
+    /// Same encoding as [`Opcode::Mul`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    MulInt { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
+    /// Quickened `*` for f64 operands — deopt to [`Opcode::Mul`] on type mismatch.
+    ///
+    /// Same encoding as [`Opcode::Mul`] (3 × [`RegisterOperand`]).
+    ///
+    /// - Registers
+    ///   - Input: lhs, rhs
+    ///   - Output: dst
+    MulF64 { dst: RegisterOperand, lhs: RegisterOperand, rhs: RegisterOperand },
+
     /// Reserved [`Opcode`].
     Reserved7 => Reserved,
     /// Reserved [`Opcode`].

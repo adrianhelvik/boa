@@ -146,6 +146,19 @@ pub struct CodeBlock {
     #[unsafe_ignore_trace]
     pub(crate) bytecode: Bytecode,
 
+    /// Per-bytecode-offset quickening state.
+    ///
+    /// Has the same length as `bytecode.bytes`. Each element is either:
+    /// - `0` — this site has never been observed
+    /// - `1..QUICKEN_THRESHOLD - 1` — warming up, not yet specialized
+    /// - `QUICKEN_THRESHOLD` — specialized; the opcode byte has been
+    ///   rewritten to the fast-path variant
+    ///
+    /// Written from within opcode handlers (which hold `&mut Context`) via
+    /// `Cell::set`, which is safe in Boa's single-threaded model.
+    #[unsafe_ignore_trace]
+    pub(crate) quicken_state: Box<[Cell<u8>]>,
+
     pub(crate) constants: ThinVec<Constant>,
 
     /// Locators for all bindings in the codeblock.
@@ -183,6 +196,7 @@ impl CodeBlock {
         flags.set(CodeBlockFlags::STRICT, strict);
         Self {
             bytecode: Bytecode::default(),
+            quicken_state: Box::default(),
             constants: ThinVec::default(),
             bindings: Box::default(),
             flags: Cell::new(flags),
@@ -417,7 +431,13 @@ impl CodeBlock {
             | Instruction::GreaterThanOrEq { lhs, rhs, dst }
             | Instruction::LessThan { lhs, rhs, dst }
             | Instruction::LessThanOrEq { lhs, rhs, dst }
-            | Instruction::InstanceOf { lhs, rhs, dst } => {
+            | Instruction::InstanceOf { lhs, rhs, dst }
+            | Instruction::AddInt { lhs, rhs, dst }
+            | Instruction::AddF64 { lhs, rhs, dst }
+            | Instruction::SubInt { lhs, rhs, dst }
+            | Instruction::SubF64 { lhs, rhs, dst }
+            | Instruction::MulInt { lhs, rhs, dst }
+            | Instruction::MulF64 { lhs, rhs, dst } => {
                 format!("lhs:{lhs}, rhs:{rhs}, dst:{dst}")
             }
             Instruction::InPrivate { dst, index, rhs } => {
@@ -882,13 +902,7 @@ impl CodeBlock {
             | Instruction::PopPrivateEnvironment
             | Instruction::Generator
             | Instruction::AsyncGenerator => String::new(),
-            Instruction::Reserved1
-            | Instruction::Reserved2
-            | Instruction::Reserved3
-            | Instruction::Reserved4
-            | Instruction::Reserved5
-            | Instruction::Reserved6
-            | Instruction::Reserved7
+            Instruction::Reserved7
             | Instruction::Reserved8
             | Instruction::Reserved9
             | Instruction::Reserved10

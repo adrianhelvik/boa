@@ -1007,15 +1007,14 @@ impl Context {
     pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
         let mut runtime_budget: u32 = budget;
 
-        while let Some(byte) = self
+        while let Some(opcode_byte) = self
             .vm
             .frame()
             .code_block
             .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
+            .get_byte(self.vm.frame().pc as usize)
         {
-            let opcode = Opcode::decode(*byte);
+            let opcode = Opcode::decode(opcode_byte);
 
             match self.execute_one(
                 |context, opcode| {
@@ -1040,15 +1039,14 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
-        while let Some(byte) = self
+        while let Some(opcode_byte) = self
             .vm
             .frame()
             .code_block
             .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
+            .get_byte(self.vm.frame().pc as usize)
         {
-            let opcode = Opcode::decode(*byte);
+            let opcode = Opcode::decode(opcode_byte);
 
             match self.execute_one(
                 |context, opcode| {

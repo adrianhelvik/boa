@@ -175,7 +175,7 @@ impl JitBackend {
 
         // Walk the bytecode into (pc, opcode index, linear-next pc, jump target)
         // tuples, and map each instruction's pc to its index for jump edges.
-        let bytes = &code.bytecode.bytes;
+        let bytes = code.bytecode.as_u8_slice();
         let mut ops: Vec<(usize, usize, usize, Option<u32>)> = Vec::new();
         let mut pc_to_index: std::collections::HashMap<usize, usize> =
             std::collections::HashMap::new();

@@ -533,3 +533,209 @@ fn recursion_in_setter_throws_uncatchable_error() {
         ),
     ]);
 }
+
+// ============================================================================
+// Adaptive quickening tests
+//
+// These tests exercise the PEP-659-style opcode quickening for Add/Sub/Mul.
+// The threshold is QUICKEN_THRESHOLD (8 executions), so loops of ≥9 iterations
+// trigger specialization.  Deopt tests verify that the specialized path
+// correctly falls back to full JS semantics when operands change type.
+// ============================================================================
+
+/// After the quickening threshold is reached with integer operands the site
+/// specializes to `AddInt`.  All results must still be exactly correct.
+#[test]
+fn quicken_add_int_basic() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let sum = 0;
+            // 20 iterations — well past the threshold of 8.
+            for (let i = 0; i < 20; i++) { sum = sum + i; }
+            sum
+        "#},
+        JsValue::new(190),
+    )]);
+}
+
+/// Float-dominated loop: specializes to `AddF64` and keeps f64 precision.
+#[test]
+fn quicken_add_f64_basic() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let x = 0.0;
+            for (let i = 0; i < 20; i++) { x = x + 0.1; }
+            // Round to avoid floating-point noise in the assertion.
+            Math.round(x * 10)
+        "#},
+        JsValue::new(20),
+    )]);
+}
+
+/// Sub quickened to `SubInt`.
+#[test]
+fn quicken_sub_int_basic() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let x = 100;
+            for (let i = 0; i < 20; i++) { x = x - 1; }
+            x
+        "#},
+        JsValue::new(80),
+    )]);
+}
+
+/// Mul quickened to `MulInt`.
+#[test]
+fn quicken_mul_int_basic() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let x = 1;
+            // Multiply by 1 so we don't overflow, 20 iterations.
+            for (let i = 0; i < 20; i++) { x = x * 1; }
+            x
+        "#},
+        JsValue::new(1),
+    )]);
+}
+
+/// Deopt: site quickens to `AddInt` then receives a float — must produce the
+/// same result as the non-quickened path (no wrong answer allowed).
+#[test]
+fn quicken_add_int_then_float_deopt() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function f(a, b) { return a + b; }
+            // Warm up with integers to trigger quickening.
+            for (let i = 0; i < 10; i++) { f(i, 1); }
+            // Now pass a float — must deopt and produce correct answer.
+            f(3, 0.5)
+        "#},
+        JsValue::new(3.5_f64),
+    )]);
+}
+
+/// Deopt: site quickens to `AddInt` then receives a string — must produce the
+/// concatenated string (full JS coercion path).
+#[test]
+fn quicken_add_int_then_string_deopt() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function f(a, b) { return a + b; }
+            for (let i = 0; i < 10; i++) { f(i, 1); }
+            f(1, "x")
+        "#},
+        js_string!("1x"),
+    )]);
+}
+
+/// Deopt: site quickens to `AddF64` then receives a string — must produce
+/// concatenation via the generic path.
+#[test]
+fn quicken_add_f64_then_string_deopt() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function f(a, b) { return a + b; }
+            for (let i = 0; i < 10; i++) { f(1.5, 0.5); }
+            f(1.5, "x")
+        "#},
+        js_string!("1.5x"),
+    )]);
+}
+
+/// Overflow: i32 addition that overflows must produce the correct f64 result.
+/// This exercises the overflow deopt path in `AddInt`.
+#[test]
+fn quicken_add_int_overflow() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function f(a, b) { return a + b; }
+            for (let i = 0; i < 10; i++) { f(1, 1); }
+            // 2^31 - 1 + 1 overflows i32, must produce 2^31 as f64.
+            f(2147483647, 1)
+        "#},
+        JsValue::new(2_147_483_648.0_f64),
+    )]);
+}
+
+/// Mixed operands through the same site: int then float then string — the site
+/// must handle all three without producing a wrong result.
+#[test]
+fn quicken_add_mixed_types() {
+    run_test_actions([
+        TestAction::assert_eq(
+            indoc! {r#"
+                function f(a, b) { return a + b; }
+                // Force quickening to AddInt.
+                let last = 0;
+                for (let i = 0; i < 10; i++) { last = f(i, 1); }
+                last  // 10
+            "#},
+            JsValue::new(10),
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                function f(a, b) { return a + b; }
+                for (let i = 0; i < 10; i++) { f(i, 1); }
+                // Now drive through float — deopt.
+                let r1 = f(1.5, 2.5);  // 4.0
+                // Then back to int — generic handles it (counter reset).
+                let r2 = f(3, 4);       // 7
+                // Then string.
+                let r3 = f("a", "b");   // "ab"
+                r1 + "-" + r2 + "-" + r3
+            "#},
+            js_string!("4-7-ab"),
+        ),
+    ]);
+}
+
+/// `-0` semantics for `MulInt`: `0 * -1 === -0` in JS.
+/// The quickened handler must not produce `0` (integer) in this case.
+#[test]
+fn quicken_mul_negative_zero() {
+    run_test_actions([
+        // `Object.is(-0, -0)` is true; `-0 === 0` is also true.
+        // Distinguish via `1 / (-0)` which produces `-Infinity`.
+        TestAction::assert_eq(
+            indoc! {r#"
+                function f(a, b) { return a * b; }
+                for (let i = 1; i < 10; i++) { f(i, i); }
+                1 / f(0, -1)   // must be -Infinity
+            "#},
+            JsValue::new(f64::NEG_INFINITY),
+        ),
+    ]);
+}
+
+/// Sub with integer overflow produces the correct f64 result.
+#[test]
+fn quicken_sub_int_overflow() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function f(a, b) { return a - b; }
+            for (let i = 0; i < 10; i++) { f(10, i); }
+            f(-2147483648, 1)  // MIN_INT - 1 overflows, must be -2147483649.0
+        "#},
+        JsValue::new(-2_147_483_649.0_f64),
+    )]);
+}
+
+/// Verify that quickening state is per-function, not global: two functions
+/// with the same `+` expression in the same script are independent sites.
+#[test]
+fn quicken_independent_sites() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            function addInt(a, b) { return a + b; }
+            function addStr(a, b) { return a + b; }
+            // Warm up addInt with integers.
+            for (let i = 0; i < 10; i++) { addInt(i, 1); }
+            // Warm up addStr with strings.
+            for (let i = 0; i < 10; i++) { addStr("x", "y"); }
+            // Each site should operate correctly with its trained type.
+            addInt(5, 3) + addStr("a", "b").length
+        "#},
+        JsValue::new(10), // 8 + 2
+    )]);
+}

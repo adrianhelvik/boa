@@ -67,6 +67,12 @@ impl CodeBlock {
                 | Instruction::LessThan { .. }
                 | Instruction::LessThanOrEq { .. }
                 | Instruction::InstanceOf { .. }
+                | Instruction::AddInt { .. }
+                | Instruction::AddF64 { .. }
+                | Instruction::SubInt { .. }
+                | Instruction::SubF64 { .. }
+                | Instruction::MulInt { .. }
+                | Instruction::MulF64 { .. }
                 | Instruction::SetAccumulator { .. }
                 | Instruction::SetFunctionName { .. }
                 | Instruction::Inc { .. }
@@ -375,13 +381,7 @@ impl CodeBlock {
                 Instruction::Return => {
                     graph.add_node(previous_pc, NodeShape::Diamond, label.into(), Color::Red);
                 }
-                Instruction::Reserved1
-                | Instruction::Reserved2
-                | Instruction::Reserved3
-                | Instruction::Reserved4
-                | Instruction::Reserved5
-                | Instruction::Reserved6
-                | Instruction::Reserved7
+                Instruction::Reserved7
                 | Instruction::Reserved8
                 | Instruction::Reserved9
                 | Instruction::Reserved10

@@ -3,9 +3,11 @@ use crate::{Context, JsResult, error::JsNativeError, vm::opcode::Operation};
 
 pub(crate) mod logical;
 pub(crate) mod macro_defined;
+pub(crate) mod quickened;
 
 pub(crate) use logical::*;
 pub(crate) use macro_defined::*;
+pub(crate) use quickened::*;
 
 /// `StrictEq` implements the Opcode Operation for `Opcode::StrictEq`
 ///
