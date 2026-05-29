@@ -30,7 +30,7 @@ macro_rules! implement_bin_ops {
                     let frame = context.vm.frame();
                     // Stable per-CodeBlock identity for the process lifetime.
                     let code_block: usize =
-                        std::ptr::addr_of!(*frame.code_block) as *const () as usize;
+                        std::ptr::addr_of!(*frame.code_block).cast::<()>() as usize;
                     let pc = frame.pc;
                     crate::vm::arith_instrument::record(
                         code_block,
@@ -91,8 +91,8 @@ implement_bin_ops!(
     Mul,
     |x: i32, y: i32| x
         .checked_mul(y)
-        .filter(|v| *v != 0 || i32::min(x, y) >= 0)
-        .is_none(),
+        .as_ref()
+        .is_none_or(|v| !(*v != 0 || i32::min(x, y) >= 0)),
     "Binary `*` operator.",
     mul_fast
 );
@@ -100,7 +100,7 @@ implement_bin_ops!(
     Div,
     div,
     Div,
-    |x: i32, y: i32| x.checked_div(y).filter(|div| y * div == x).is_none(),
+    |x: i32, y: i32| x.checked_div(y).as_ref().is_none_or(|div| y * div != x),
     "Binary `/` operator.",
     div_fast
 );

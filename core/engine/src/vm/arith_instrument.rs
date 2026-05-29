@@ -19,9 +19,9 @@
 //!
 //! - `total`     — how many times this site executed.
 //! - `mono_i32`  — both operands were `Integer32` and the i32 fast op did **not**
-//!                 overflow (i.e. perfectly specializable to an int fast-path op).
+//!   overflow (i.e. perfectly specializable to an int fast-path op).
 //! - `i32_ovf`   — both operands were `Integer32` but the result overflowed i32
-//!                 (a specialized op would have to deopt here).
+//!   (a specialized op would have to deopt here).
 //! - `f64`       — both operands were numeric and at least one was `Float64`.
 //! - `other`     — anything else (string concat, object, bigint, bool, undefined…).
 //!
@@ -122,6 +122,7 @@ impl Registry {
 }
 
 impl Drop for Registry {
+    #[allow(clippy::print_stderr)] // intentional: dump the instrumentation report to stderr
     fn drop(&mut self) {
         let report = render_report(&self.sites);
         eprint!("{report}");
@@ -233,7 +234,7 @@ fn render_report(sites: &HashMap<SiteKey, Counts>) -> String {
         e.other += c.other;
     }
     let mut kinds: Vec<(ArithKind, Counts)> = by_kind.into_iter().collect();
-    kinds.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    kinds.sort_by_key(|b| std::cmp::Reverse(b.1.total));
     out.push_str("\n-- by opcode kind (total / mono_i32% / f64% / other%) --\n");
     for (k, c) in &kinds {
         let _ = writeln!(
@@ -250,7 +251,7 @@ fn render_report(sites: &HashMap<SiteKey, Counts>) -> String {
 
     // Hot-site concentration.
     let mut by_site: Vec<(&SiteKey, &Counts)> = sites.iter().collect();
-    by_site.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    by_site.sort_by_key(|b| std::cmp::Reverse(b.1.total));
 
     out.push_str("\n-- hot-site concentration --\n");
     for top in [1usize, 5, 10, 20, 50] {
