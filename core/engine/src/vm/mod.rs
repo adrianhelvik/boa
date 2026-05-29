@@ -115,7 +115,10 @@ pub struct Vm {
     /// returns `ControlFlow::Break` (the value can't cross the C ABI by return).
     /// The JIT trampoline retrieves it after a shim reports the break status.
     #[cfg(feature = "jit")]
-    #[allow(dead_code, reason = "consumed by the JIT compiler (JIT-1, in progress)")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the JIT compiler (JIT-1, in progress)"
+    )]
     pub(crate) jit_pending: Option<CompletionRecord>,
 
     #[cfg(feature = "trace")]

@@ -96,9 +96,7 @@ pub fn compile_add_i64() -> extern "C" fn(i64, i64) -> i64 {
 /// calling existing Rust functions with a threaded context pointer. The helper
 /// address is baked in as a constant and called indirectly.
 #[must_use]
-pub fn compile_call_helper(
-    helper: extern "C" fn(*mut u8) -> i64,
-) -> extern "C" fn(*mut u8) -> i64 {
+pub fn compile_call_helper(helper: extern "C" fn(*mut u8) -> i64) -> extern "C" fn(*mut u8) -> i64 {
     let mut module = host_module().expect("host should support Cranelift");
     let ptr = module.target_config().pointer_type();
     let mut ctx = module.make_context();

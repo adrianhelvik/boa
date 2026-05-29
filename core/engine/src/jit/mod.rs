@@ -227,9 +227,9 @@ impl JitBackend {
                 let shim_addr = JIT_OP_SHIMS[op_idx] as usize as i64;
                 let shim_addr_val = bcx.ins().iconst(ptr, shim_addr);
                 let pc_arg = bcx.ins().iconst(types::I32, op_pc as i64);
-                let call =
-                    bcx.ins()
-                        .call_indirect(shim_sigref, shim_addr_val, &[ctx_val, pc_arg]);
+                let call = bcx
+                    .ins()
+                    .call_indirect(shim_sigref, shim_addr_val, &[ctx_val, pc_arg]);
                 let status = bcx.inst_results(call)[0];
 
                 // Break? (high bit set)
@@ -259,7 +259,9 @@ impl JitBackend {
                         let check_target = bcx.create_block();
                         bcx.ins().brif(is_linear, fall, &[], check_target, &[]);
                         bcx.switch_to_block(check_target);
-                        let tpc = bcx.ins().iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let tpc = bcx
+                            .ins()
+                            .iconst(types::I64, i64::from(jump_target.unwrap()));
                         let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
                         bcx.ins()
                             .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
@@ -270,7 +272,9 @@ impl JitBackend {
                     }
                     (None, Some(tgt)) => {
                         // Last instruction is a jump (e.g. a loop's trailing back-edge).
-                        let tpc = bcx.ins().iconst(types::I64, i64::from(jump_target.unwrap()));
+                        let tpc = bcx
+                            .ins()
+                            .iconst(types::I64, i64::from(jump_target.unwrap()));
                         let is_target = bcx.ins().icmp(IntCC::Equal, status, tpc);
                         bcx.ins()
                             .brif(is_target, tgt, &[], deopt_block, &[status.into()]);
@@ -371,12 +375,8 @@ mod tests {
         // the next step); it exercises the bytecode → Cranelift lowering.
         let mut context = Context::default();
         let src = "function add(a, b) { return a + b; }";
-        let script = crate::Script::parse(
-            crate::Source::from_bytes(src),
-            None,
-            &mut context,
-        )
-        .expect("parse");
+        let script = crate::Script::parse(crate::Source::from_bytes(src), None, &mut context)
+            .expect("parse");
         let code = script.codeblock(&mut context).expect("codeblock");
         let mut backend = JitBackend::new();
         let _compiled = backend.compile_codeblock(&code);
@@ -393,13 +393,13 @@ mod tests {
         let src = "function add(a, b) { return a + b; } let r = add(2, 3) + 10; r";
 
         let mut c1 = Context::default();
-        let s1 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1)
-            .expect("parse");
+        let s1 =
+            crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1).expect("parse");
         let interp = s1.evaluate(&mut c1).expect("interpret");
 
         let mut c2 = Context::default();
-        let s2 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2)
-            .expect("parse");
+        let s2 =
+            crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2).expect("parse");
         let mut backend = JitBackend::new();
         let jit = s2.evaluate_jit(&mut c2, &mut backend).expect("jit");
 
@@ -413,17 +413,21 @@ mod tests {
     /// confirm the hand-off is correct before native loops/calls are added).
     fn assert_jit_matches_interp(src: &str, expected: i32) {
         let mut c1 = Context::default();
-        let s1 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1)
-            .expect("parse");
+        let s1 =
+            crate::Script::parse(crate::Source::from_bytes(src), None, &mut c1).expect("parse");
         let interp = s1.evaluate(&mut c1).expect("interpret");
 
         let mut c2 = Context::default();
-        let s2 = crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2)
-            .expect("parse");
+        let s2 =
+            crate::Script::parse(crate::Source::from_bytes(src), None, &mut c2).expect("parse");
         let mut backend = JitBackend::new();
         let jit = s2.evaluate_jit(&mut c2, &mut backend).expect("jit");
 
-        assert_eq!(interp.as_i32(), Some(expected), "interpreter result for: {src}");
+        assert_eq!(
+            interp.as_i32(),
+            Some(expected),
+            "interpreter result for: {src}"
+        );
         assert_eq!(jit.as_i32(), Some(expected), "jit result for: {src}");
     }
 
