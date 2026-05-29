@@ -607,6 +607,7 @@ impl<'ctx> BuiltInBuilder<'ctx, Callable<Constructor>> {
 }
 
 impl<'ctx> BuiltInConstructorWithPrototype<'ctx> {
+    #[allow(clippy::too_many_arguments)]
     fn from_constants(
         realm: &'ctx Realm,
         function: NativeFunctionPointer,

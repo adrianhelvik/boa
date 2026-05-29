@@ -105,9 +105,8 @@ impl SetName {
         // `BindingLocator` clone and the `find_runtime_binding` walk. The
         // helper returns ownership of `value` back when it could not take
         // the fast path, so the slow path below can consume it.
-        let value = match try_set_binding_fast(context, usize::from(index), value) {
-            None => return Ok(()),
-            Some(v) => v,
+        let Some(value) = try_set_binding_fast(context, usize::from(index), value) else {
+            return Ok(());
         };
 
         let code_block = context.vm.frame().code_block();

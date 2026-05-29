@@ -8,6 +8,11 @@ publish = false
 boa_engine = { workspace = true, features = ["intl_bundled"] }
 boa_runtime.workspace = true
 
+[features]
+# Passthrough for the off-by-default arith-opportunity instrumentation in
+# boa_engine. Enable with `--features arith-instrument` on this crate.
+arith-instrument = ["boa_engine/arith-instrument"]
+
 [dev-dependencies]
 criterion.workspace = true
 walkdir = "2"

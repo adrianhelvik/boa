@@ -53,6 +53,9 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 
+#[cfg(feature = "arith-instrument")]
+pub(crate) mod arith_instrument;
+
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
 
@@ -815,6 +818,7 @@ impl Context {
 
 impl Context {
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
@@ -823,6 +827,7 @@ impl Context {
     }
 
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,

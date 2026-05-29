@@ -900,6 +900,34 @@ impl JsValue {
         let y = other.as_number_cheap()?;
         Some(Self::new(x != y))
     }
+
+    /// Classify an operand pair for arith-opportunity instrumentation.
+    ///
+    /// Returns whether this pair is monomorphic-i32 (both `Integer32` and the
+    /// integer op does not overflow), i32-with-overflow, f64-numeric, or other.
+    /// `overflows` is supplied by the caller because i32 overflow is
+    /// operator-specific; for non-arithmetic ops (comparisons, bitwise) pass a
+    /// closure that always returns `false`.
+    #[cfg(feature = "arith-instrument")]
+    #[inline]
+    pub(crate) fn classify_arith_pair(
+        &self,
+        other: &Self,
+        overflows: impl Fn(i32, i32) -> bool,
+    ) -> crate::vm::arith_instrument::OperandClass {
+        use crate::vm::arith_instrument::OperandClass;
+        if let (Some(x), Some(y)) = (self.0.as_integer32(), other.0.as_integer32()) {
+            return if overflows(x, y) {
+                OperandClass::I32Overflow
+            } else {
+                OperandClass::MonoI32
+            };
+        }
+        if self.as_number_cheap().is_some() && other.as_number_cheap().is_some() {
+            return OperandClass::F64;
+        }
+        OperandClass::Other
+    }
 }
 
 /// The result of the [Abstract Relational Comparison][arc].
