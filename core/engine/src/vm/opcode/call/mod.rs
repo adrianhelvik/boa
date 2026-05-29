@@ -6,11 +6,11 @@ use dynify::Dynify;
 use super::{IndexOperand, RegisterOperand};
 use crate::{
     Context, JsError, JsExpect, JsObject, JsResult, JsValue, NativeFunction,
-    builtins::{Promise, promise::PromiseCapability},
+    builtins::{Promise, function::OrdinaryFunction, promise::PromiseCapability},
     error::JsNativeError,
     job::NativeAsyncJob,
     module::{ImportAttribute, ModuleKind, ModuleRequest, Referrer},
-    object::FunctionObjectBuilder,
+    object::{FunctionObjectBuilder, internal_methods::InternalMethodCallContext},
     vm::opcode::Operation,
 };
 
@@ -184,16 +184,41 @@ pub(crate) struct Call;
 impl Call {
     #[inline(always)]
     pub(super) fn operation(argument_count: IndexOperand, context: &mut Context) -> JsResult<()> {
+        let argument_count = usize::from(argument_count);
         let func = context
             .vm
             .stack
-            .calling_convention_get_function(argument_count.into());
+            .calling_convention_get_function(argument_count);
 
         let Some(object) = func.as_object() else {
             return Err(Self::handle_not_callable());
         };
 
-        object.__call__(argument_count.into()).resolve(context)?;
+        // Fast path: nearly every call targets an ordinary JS function, whose
+        // `[[Call]]` vtable slot is always `function_call` (this also covers
+        // generators and async functions — they share the same entry; only
+        // bound functions, proxies and native functions differ). Invoking it
+        // directly skips the work the generic `__call__` path pays on every
+        // call: building a `CallValue::Pending` (which clones the callee
+        // `JsObject` and captures a `NativeSourceInfo`), the `resolve()` loop,
+        // and the indirect dispatch through the internal-methods vtable —
+        // and it lets `function_call` inline into this handler. This is the
+        // interpreter-tier analogue of a monomorphic call inline cache.
+        //
+        // SAFETY/correctness: anything that is not an `OrdinaryFunction` falls
+        // through to the generic `__call__` path unchanged, so bound/proxy/
+        // native callees keep their exact semantics.
+        if object.is::<OrdinaryFunction>() {
+            return crate::builtins::function::function_call(
+                &object,
+                argument_count,
+                &mut InternalMethodCallContext::new(context),
+            )?
+            .resolve(context)
+            .map(drop);
+        }
+
+        object.__call__(argument_count).resolve(context)?;
 
         Ok(())
     }
@@ -246,6 +271,20 @@ impl CallSpread {
                 .with_message("not a callable function")
                 .into());
         };
+
+        // Same ordinary-function fast path as `Call` (see `Call::operation`):
+        // spread calls route through the identical `function_call` entry, so an
+        // `OrdinaryFunction` callee can skip the vtable indirect + `CallValue`
+        // round-trip. Non-ordinary callees fall through unchanged.
+        if object.is::<OrdinaryFunction>() {
+            return crate::builtins::function::function_call(
+                &object,
+                argument_count,
+                &mut InternalMethodCallContext::new(context),
+            )?
+            .resolve(context)
+            .map(drop);
+        }
 
         object.__call__(argument_count).resolve(context)?;
         Ok(())
