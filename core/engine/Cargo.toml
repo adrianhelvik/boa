@@ -26,6 +26,13 @@ jit = [
 
 embedded_lz4 = ["boa_macros/embedded_lz4", "lz4_flex"]
 
+# Off-by-default opportunity instrumentation for the adaptive-arithmetic lever.
+# Counts per-site monomorphic-i32 / f64 / other operand classes for the generic
+# binary-arith opcodes and dumps a report on thread exit. Never enable in prod.
+# See core/engine/src/vm/arith_instrument.rs and
+# planning/js-performance-roadmap/03a-arith-opportunity-findings.md.
+arith-instrument = []
+
 # Replace the NaN-boxing implementation of `JsValueInner` with an
 # enum-based implementation. This implementation is less performant
 # but compatible with more platforms.

@@ -53,6 +53,9 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 
+#[cfg(feature = "arith-instrument")]
+pub(crate) mod arith_instrument;
+
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
 
