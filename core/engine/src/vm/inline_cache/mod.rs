@@ -15,6 +15,143 @@ mod tests;
 
 pub(crate) const PIC_CAPACITY: usize = 4;
 
+// ---------------------------------------------------------------------------
+// Element-access inline cache
+// ---------------------------------------------------------------------------
+
+/// The kind of dense indexed storage observed at an element-access site.
+///
+/// Stored in [`ElementIC`] as feedback for both the interpreter fast path
+/// and the JIT Stage 2 specialiser. Knowing that a site always sees
+/// `DenseI32` lets the JIT emit a direct `i32` load without a tag check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DenseKind {
+    /// All elements are `i32` (stored as `ThinVec<i32>`).
+    DenseI32,
+    /// All elements fit in `f64` (stored as `ThinVec<f64>`).
+    DenseF64,
+    /// Elements are arbitrary `JsValue`s (stored as `ThinVec<JsValue>`).
+    DenseElement,
+}
+
+/// The seeded payload of an [`ElementIC`]. Bundled into its own struct so
+/// that the unseeded state can be represented as `None` without needing a
+/// sentinel `WeakShape` value.
+#[derive(Clone, Debug, Trace, Finalize)]
+struct ElementICEntry {
+    /// Raw heap address of the cached receiver shape. Used for the hot-path
+    /// pointer-equality compare. Never read without also checking `shape`
+    /// liveness — see [`ElementIC::matches`].
+    #[unsafe_ignore_trace]
+    shape_addr: usize,
+
+    /// Weak liveness guard for the cached shape.
+    shape: WeakShape,
+
+    /// The kind of dense storage observed when this entry was created.
+    /// `DenseKind` contains no GC-managed pointers.
+    #[unsafe_ignore_trace]
+    dense_kind: DenseKind,
+}
+
+/// A single-entry inline cache for `GetPropertyByValue` /
+/// `SetPropertyByValue` sites whose key is a numeric index (`obj[i]`).
+///
+/// ## Design
+///
+/// Unlike the named-property PIC, element-access ICs are monomorphic: a
+/// site that iterates over one dense array is the overwhelming common case.
+/// When a second (different) receiver shape is observed we overwrite the
+/// entry with the new shape, betting that the most-recent winner is the
+/// future winner too (last-write-wins eviction).
+///
+/// ## Interior mutability
+///
+/// The seeded entry is held in a `GcRefCell` so that `seed` can update
+/// the IC through a shared `&ElementIC` reference, matching the access
+/// pattern used by the named-property `InlineCache::set`. The borrow
+/// discipline mirrors the PIC: `matches` holds a short-lived immutable
+/// borrow, `seed` holds a brief mutable borrow on the cold (miss) path.
+///
+/// ## GC soundness
+///
+/// The same fused address + liveness discipline as [`CacheEntry::matches`]
+/// applies here: we store the raw heap address alongside a [`WeakShape`]
+/// liveness guard, and the two checks are always performed together in
+/// [`ElementIC::matches`]. Splitting them would reintroduce the
+/// address-reuse false-positive described in the [`CacheEntry`] docs.
+///
+/// ## JIT fuel
+///
+/// [`ElementIC::dense_kind`] exposes the observed storage kind so that JIT
+/// Stage 2 can emit a specialised load (e.g. a direct `i32` array read)
+/// without re-profiling element accesses from scratch.
+#[derive(Clone, Debug, Trace, Finalize)]
+pub(crate) struct ElementIC {
+    /// Cached entry, or `None` when the IC is unseeded (cold site).
+    /// `GcRefCell` for interior mutability through a `&CodeBlock` reference.
+    entry: GcRefCell<Option<ElementICEntry>>,
+}
+
+impl ElementIC {
+    /// Return an empty (unseeded) IC.
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            entry: GcRefCell::new(None),
+        }
+    }
+
+    /// Fused address + liveness check — the hot path.
+    ///
+    /// Returns `Some(kind)` iff the IC has a seeded entry whose shape is
+    /// the same live shape as `shape`, `None` on any miss (including the
+    /// unseeded state).
+    ///
+    /// The `Option` unwrap short-circuits before the address compare for
+    /// the cold (unseeded) case; the address compare short-circuits before
+    /// `is_upgradable()` for the wrong-shape case.
+    #[inline]
+    pub(crate) fn matches(&self, shape: &Shape) -> Option<DenseKind> {
+        let entry_ref = self.entry.borrow();
+        let entry = entry_ref.as_ref()?;
+        if entry.shape_addr == shape.to_addr_usize() && entry.shape.is_upgradable() {
+            Some(entry.dense_kind)
+        } else {
+            None
+        }
+    }
+
+    /// Seed (or overwrite) the IC with the observed `(shape, dense_kind)`.
+    ///
+    /// Called on the slow path when the receiver is a dense array. On the
+    /// next execution with the same receiver shape, [`matches`] returns
+    /// `Some(kind)` and the fast path skips the `is_array` vtable check
+    /// and the `base_class` clone.
+    ///
+    /// [`matches`]: ElementIC::matches
+    pub(crate) fn seed(&self, shape: &Shape, kind: DenseKind) {
+        *self.entry.borrow_mut() = Some(ElementICEntry {
+            shape_addr: shape.to_addr_usize(),
+            shape: shape.into(),
+            dense_kind: kind,
+        });
+    }
+
+    /// Expose the cached dense-storage kind for JIT feedback queries.
+    ///
+    /// Returns `None` when the IC is unseeded.
+    #[inline]
+    #[allow(dead_code)] // consumed by JIT Stage 2
+    pub(crate) fn dense_kind(&self) -> Option<DenseKind> {
+        self.entry.borrow().as_ref().map(|e| e.dense_kind)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Named-property polymorphic inline cache (existing)
+// ---------------------------------------------------------------------------
+
 /// A cached shape-to-slot mapping for a polymorphic inline cache.
 ///
 /// The address compare and the liveness check are intentionally fused into

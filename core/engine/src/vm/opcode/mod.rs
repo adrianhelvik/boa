@@ -1234,6 +1234,8 @@ generate_opcodes! {
     ///
     /// Like `object[key]`
     ///
+    /// - Operands:
+    ///   - ic_index: `IndexOperand` — index into `CodeBlock::element_ic`
     /// - Registers:
     ///   - Input: object, receiver, key
     ///   - Output: dst
@@ -1241,13 +1243,16 @@ generate_opcodes! {
         dst: RegisterOperand,
         key: RegisterOperand,
         receiver: RegisterOperand,
-        object: RegisterOperand
+        object: RegisterOperand,
+        ic_index: IndexOperand
     },
 
     /// Get a property by value from an object.
     ///
     /// Like `object[key]`
     ///
+    /// - Operands:
+    ///   - ic_index: `IndexOperand` — index into `CodeBlock::element_ic`
     /// - Registers:
     ///   - Input: object, receiver
     ///   - Output: dst, key
@@ -1255,7 +1260,8 @@ generate_opcodes! {
         dst: RegisterOperand,
         key: RegisterOperand,
         receiver: RegisterOperand,
-        object: RegisterOperand
+        object: RegisterOperand,
+        ic_index: IndexOperand
     },
 
     /// Sets a property by name of an object.
@@ -1338,13 +1344,16 @@ generate_opcodes! {
     ///
     /// Like `object[key] = value`
     ///
+    /// - Operands:
+    ///   - ic_index: `IndexOperand` — index into `CodeBlock::element_ic`
     /// - Registers:
     ///   - Input: value, key, receiver, object
     SetPropertyByValue {
         value: RegisterOperand,
         key: RegisterOperand,
         receiver: RegisterOperand,
-        object: RegisterOperand
+        object: RegisterOperand,
+        ic_index: IndexOperand
     },
 
     /// Defines a own property of an object by value.

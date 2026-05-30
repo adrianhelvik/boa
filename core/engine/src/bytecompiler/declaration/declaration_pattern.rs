@@ -56,7 +56,7 @@ impl ByteCompiler<'_> {
                                     let key = self.register_allocator.alloc();
                                     self.compile_expr(node, &key);
                                     if rest_exits {
-                                        self.bytecode.emit_get_property_by_value_push(
+                                        self.emit_get_property_by_value_push_ic(
                                             dst.variable(),
                                             key.variable(),
                                             object.variable(),
@@ -64,7 +64,7 @@ impl ByteCompiler<'_> {
                                         );
                                         excluded_keys_registers.push(key);
                                     } else {
-                                        self.bytecode.emit_get_property_by_value(
+                                        self.emit_get_property_by_value_ic(
                                             dst.variable(),
                                             key.variable(),
                                             object.variable(),
@@ -165,7 +165,7 @@ impl ByteCompiler<'_> {
                                         }
                                         PropertyName::Computed(_) => {
                                             if rest_exits {
-                                                compiler.bytecode.emit_get_property_by_value_push(
+                                                compiler.emit_get_property_by_value_push_ic(
                                                     dst.variable(),
                                                     key.variable(),
                                                     object.variable(),
@@ -173,7 +173,7 @@ impl ByteCompiler<'_> {
                                                 );
                                                 excluded_keys_registers.push(key);
                                             } else {
-                                                compiler.bytecode.emit_get_property_by_value(
+                                                compiler.emit_get_property_by_value_ic(
                                                     dst.variable(),
                                                     key.variable(),
                                                     object.variable(),
@@ -209,7 +209,7 @@ impl ByteCompiler<'_> {
                                 PropertyName::Computed(node) => {
                                     let key = self.register_allocator.alloc();
                                     self.compile_expr(node, &key);
-                                    self.bytecode.emit_get_property_by_value(
+                                    self.emit_get_property_by_value_ic(
                                         dst.variable(),
                                         key.variable(),
                                         object.variable(),

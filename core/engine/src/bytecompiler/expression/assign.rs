@@ -198,7 +198,7 @@ impl ByteCompiler<'_> {
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
 
-                            compiler.bytecode.emit_get_property_by_value_push(
+                            compiler.emit_get_property_by_value_push_ic(
                                 dst.variable(),
                                 key.variable(),
                                 object.variable(),
@@ -207,7 +207,7 @@ impl ByteCompiler<'_> {
 
                             early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
 
-                            compiler.bytecode.emit_set_property_by_value(
+                            compiler.emit_set_property_by_value_ic(
                                 dst.variable(),
                                 key.variable(),
                                 object.variable(),
@@ -273,7 +273,7 @@ impl ByteCompiler<'_> {
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
 
-                            compiler.bytecode.emit_get_property_by_value_push(
+                            compiler.emit_get_property_by_value_push_ic(
                                 dst.variable(),
                                 key.variable(),
                                 receiver.variable(),
@@ -282,7 +282,7 @@ impl ByteCompiler<'_> {
 
                             early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
 
-                            compiler.bytecode.emit_set_property_by_value(
+                            compiler.emit_set_property_by_value_ic(
                                 dst.variable(),
                                 key.variable(),
                                 receiver.variable(),

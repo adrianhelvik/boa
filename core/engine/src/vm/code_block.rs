@@ -18,7 +18,7 @@ use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
 use super::{
-    InlineCache,
+    ElementIC, InlineCache,
     opcode::{Address, Bytecode, Instruction, InstructionIterator},
     source_info::{SourceInfo, SourceMap, SourcePath},
 };
@@ -156,8 +156,15 @@ pub struct CodeBlock {
     #[unsafe_ignore_trace]
     pub(crate) handlers: ThinVec<Handler>,
 
-    /// inline caching
+    /// Named-property inline caches (by-name PIC, 4-way polymorphic).
     pub(crate) ic: Box<[InlineCache]>,
+
+    /// Element-access inline caches — one entry per `GetPropertyByValue` /
+    /// `GetPropertyByValuePush` / `SetPropertyByValue` site. Monomorphic;
+    /// caches the receiver's shape + dense-storage kind so that `obj[i]`
+    /// with an integer key can skip the `is_array` vtable check and the
+    /// `base_class` clone on the hot path.
+    pub(crate) element_ic: Box<[ElementIC]>,
 
     /// Bytecode to source code mapping.
     pub(crate) source_info: SourceInfo,
@@ -193,6 +200,7 @@ impl CodeBlock {
             parameter_length: 0,
             handlers: ThinVec::default(),
             ic: Box::default(),
+            element_ic: Box::default(),
             source_info: SourceInfo::new(
                 SourceMap::new(Box::default(), SourcePath::None),
                 name,
@@ -694,22 +702,27 @@ impl CodeBlock {
                 key,
                 receiver,
                 object,
+                ic_index,
             }
             | Instruction::GetPropertyByValuePush {
                 dst,
                 key,
                 receiver,
                 object,
+                ic_index,
             } => {
-                format!("dst:{dst}, object:{object}, receiver:{receiver}, key:{key}")
+                format!("dst:{dst}, object:{object}, receiver:{receiver}, key:{key}, ic:{ic_index}")
             }
             Instruction::SetPropertyByValue {
                 value,
                 key,
                 receiver,
                 object,
+                ic_index,
             } => {
-                format!("object:{object}, receiver:{receiver}, key:{key}, value:{value}")
+                format!(
+                    "object:{object}, receiver:{receiver}, key:{key}, value:{value}, ic:{ic_index}"
+                )
             }
             Instruction::DefineOwnPropertyByValue { value, key, object }
             | Instruction::DefineClassStaticMethodByValue { value, key, object }

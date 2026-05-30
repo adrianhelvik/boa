@@ -2,9 +2,15 @@ use boa_string::StaticJsStrings;
 
 use crate::{
     Context, JsResult, JsValue, js_string,
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    object::{
+        IndexedProperties, internal_methods::InternalMethodPropertyContext,
+        shape::slot::SlotAttributes,
+    },
     property::PropertyKey,
-    vm::opcode::{IndexOperand, Operation, RegisterOperand},
+    vm::{
+        DenseKind,
+        opcode::{IndexOperand, Operation, RegisterOperand},
+    },
 };
 
 /// IC-hit fast path for [`get_by_name`] that runs without cloning the source
@@ -124,21 +130,75 @@ fn get_by_name<const LENGTH: bool>(
     Ok(())
 }
 
+/// Map the current `IndexedProperties` kind to a [`DenseKind`] discriminant,
+/// or `None` if the storage is sparse (no IC seeding for sparse sites).
+#[inline]
+fn indexed_properties_dense_kind(props: &IndexedProperties) -> Option<DenseKind> {
+    match props {
+        IndexedProperties::DenseI32(_) => Some(DenseKind::DenseI32),
+        IndexedProperties::DenseF64(_) => Some(DenseKind::DenseF64),
+        IndexedProperties::DenseElement(_) => Some(DenseKind::DenseElement),
+        IndexedProperties::SparseElement(_) | IndexedProperties::SparseProperty(_) => None,
+    }
+}
+
 fn get_by_value<const PUSH_KEY: bool>(
-    (dst, key, receiver, object): (
+    (dst, key, receiver, object, ic_index): (
         RegisterOperand,
         RegisterOperand,
         RegisterOperand,
         RegisterOperand,
+        IndexOperand,
     ),
     context: &mut Context,
 ) -> JsResult<()> {
+    // --- Element-access IC fast path ---
+    //
+    // When the key register already holds a non-negative integer and the
+    // object register holds an object whose shape matches the element IC,
+    // call `get_dense_property` directly — skipping `is_array()` (vtable
+    // load), `base_class()` (potential Gc refcount), and `to_property_key`.
+    //
+    // Safety of the deopt: if `get_dense_property` returns `None` (the
+    // index is out-of-bounds, or the storage transitioned to sparse since
+    // the IC was seeded) we simply fall through to the slow path, which
+    // produces the correct result. A false-positive IC hit (same shape but
+    // now sparse storage) is a performance miss, not a correctness bug.
+    {
+        let key_val = context.vm.get_register(key.into());
+        // Integers stored as JsVariant::Integer32. Non-negative i32 is a
+        // valid u32 array index candidate; skip non-integers and negatives.
+        if let crate::value::JsVariant::Integer32(raw_key) = key_val.variant()
+            && raw_key >= 0
+        {
+            let base_val = context.vm.get_register(object.into());
+            if let Some(obj_ref) = base_val.as_object_borrowed() {
+                let obj_borrow = obj_ref.borrow();
+                let ic = &context.vm.frame().code_block().element_ic[usize::from(ic_index)];
+                // Shape guard: fused address-equality + liveness check.
+                if ic.matches(obj_borrow.shape()).is_some()
+                    && let Some(element) =
+                        obj_borrow.properties().get_dense_property(raw_key as u32)
+                {
+                    drop(obj_borrow);
+                    // For `GetPropertyByValuePush` we must also store
+                    // the key back. The register already holds the
+                    // correct integer value, so nothing extra is needed
+                    // (the caller placed the key there).
+                    context.vm.set_register(dst.into(), element);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // --- General path: key conversion + property lookup ---
     let key_value = context.vm.get_register(key.into()).clone();
     let base = context.vm.get_register(object.into()).clone();
     let object = base.base_class(context)?;
     let key_value = key_value.to_property_key(context)?;
 
-    // Fast Path
+    // Fast paths for string indexing and `length`:
     //
     // NOTE: Since we’re using the prototype returned directly by `base_class()`,
     //       we need to handle string primitives separately due to the
@@ -149,10 +209,20 @@ fn get_by_value<const PUSH_KEY: bool>(
                 let object_borrowed = object.borrow();
                 if let Some(element) = object_borrowed.properties().get_dense_property(index.get())
                 {
+                    // Seed the element IC so the next execution of this site
+                    // can hit the fast path above, skipping base_class/to_property_key.
+                    let kind = indexed_properties_dense_kind(
+                        &object_borrowed.properties().indexed_properties,
+                    );
+                    drop(object_borrowed);
+                    if let Some(kind) = kind {
+                        let ic = &context.vm.frame().code_block().element_ic[usize::from(ic_index)];
+                        ic.seed(object.borrow().shape(), kind);
+                    }
+
                     if PUSH_KEY {
                         context.vm.set_register(key.into(), key_value.into());
                     }
-
                     context.vm.set_register(dst.into(), element);
                     return Ok(());
                 }
@@ -186,7 +256,7 @@ fn get_by_value<const PUSH_KEY: bool>(
 
     let receiver = context.vm.get_register(receiver.into());
 
-    // Slow path:
+    // Slow path: generic internal method lookup.
     let result = object.__get__(
         &key_value,
         receiver.clone(),
@@ -319,6 +389,7 @@ impl GetPropertyByValue {
             RegisterOperand,
             RegisterOperand,
             RegisterOperand,
+            IndexOperand,
         ),
         context: &mut Context,
     ) -> JsResult<()> {
@@ -347,6 +418,7 @@ impl GetPropertyByValuePush {
             RegisterOperand,
             RegisterOperand,
             RegisterOperand,
+            IndexOperand,
         ),
         context: &mut Context,
     ) -> JsResult<()> {
