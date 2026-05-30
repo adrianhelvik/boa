@@ -44,8 +44,8 @@ use crate::{
     builtins::function::{ThisMode, arguments::MappedArguments},
     js_string,
     vm::{
-        CallFrame, CodeBlock, CodeBlockFlags, Constant, GeneratorResumeKind, GlobalFunctionBinding,
-        Handler, InlineCache,
+        CallFrame, CodeBlock, CodeBlockFlags, Constant, ElementIC, GeneratorResumeKind,
+        GlobalFunctionBinding, Handler, InlineCache,
         opcode::{Address, BindingOpcode, BytecodeEmitter, RegisterOperand},
         source_info::{SourceInfo, SourceMap, SourceMapBuilder, SourcePath},
     },
@@ -532,6 +532,7 @@ pub struct ByteCompiler<'ctx> {
     code_block_flags: CodeBlockFlags,
     handlers: ThinVec<Handler>,
     pub(crate) ic: Vec<InlineCache>,
+    pub(crate) element_ic: Vec<ElementIC>,
     literals_map: FxHashMap<Literal, u32>,
     names_map: FxHashMap<Sym, u32>,
     bindings_map: FxHashMap<BindingLocator, u32>,
@@ -662,6 +663,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             code_block_flags,
             handlers: ThinVec::default(),
             ic: Vec::default(),
+            element_ic: Vec::default(),
 
             literals_map: FxHashMap::default(),
             names_map: FxHashMap::default(),
@@ -995,6 +997,51 @@ impl<'ctx> ByteCompiler<'ctx> {
                 BindingAccessOpcode::DeleteName => self.bytecode.emit_store_false(value.variable()),
             },
         }
+    }
+
+    /// Emit a `GetPropertyByValue` instruction with a freshly allocated
+    /// element IC entry, returning the allocated IC index.
+    fn emit_get_property_by_value_ic(
+        &mut self,
+        dst: RegisterOperand,
+        key: RegisterOperand,
+        receiver: RegisterOperand,
+        object: RegisterOperand,
+    ) {
+        let ic_index = self.element_ic.len() as u32;
+        self.element_ic.push(ElementIC::new());
+        self.bytecode
+            .emit_get_property_by_value(dst, key, receiver, object, ic_index.into());
+    }
+
+    /// Emit a `GetPropertyByValuePush` instruction with a freshly allocated
+    /// element IC entry, returning the allocated IC index.
+    fn emit_get_property_by_value_push_ic(
+        &mut self,
+        dst: RegisterOperand,
+        key: RegisterOperand,
+        receiver: RegisterOperand,
+        object: RegisterOperand,
+    ) {
+        let ic_index = self.element_ic.len() as u32;
+        self.element_ic.push(ElementIC::new());
+        self.bytecode
+            .emit_get_property_by_value_push(dst, key, receiver, object, ic_index.into());
+    }
+
+    /// Emit a `SetPropertyByValue` instruction with a freshly allocated
+    /// element IC entry, returning the allocated IC index.
+    fn emit_set_property_by_value_ic(
+        &mut self,
+        value: RegisterOperand,
+        key: RegisterOperand,
+        receiver: RegisterOperand,
+        object: RegisterOperand,
+    ) {
+        let ic_index = self.element_ic.len() as u32;
+        self.element_ic.push(ElementIC::new());
+        self.bytecode
+            .emit_set_property_by_value(value, key, receiver, object, ic_index.into());
     }
 
     fn emit_get_property_by_name(
@@ -1491,7 +1538,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                             compiler.compile_expr(access.target(), &object);
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
-                            compiler.bytecode.emit_get_property_by_value(
+                            compiler.emit_get_property_by_value_ic(
                                 dst.variable(),
                                 key.variable(),
                                 object.variable(),
@@ -1531,7 +1578,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                         PropertyAccessField::Expr(expr) => {
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
-                            compiler.bytecode.emit_get_property_by_value(
+                            compiler.emit_get_property_by_value_ic(
                                 dst.variable(),
                                 key.variable(),
                                 receiver.variable(),
@@ -1612,7 +1659,7 @@ impl<'ctx> ByteCompiler<'ctx> {
 
                         let value = expr_fn(self);
 
-                        self.bytecode.emit_set_property_by_value(
+                        self.emit_set_property_by_value_ic(
                             value.variable(),
                             key.variable(),
                             object.variable(),
@@ -1662,7 +1709,7 @@ impl<'ctx> ByteCompiler<'ctx> {
 
                         let value = expr_fn(self);
 
-                        self.bytecode.emit_set_property_by_value(
+                        self.emit_set_property_by_value_ic(
                             value.variable(),
                             key.variable(),
                             receiver.variable(),
@@ -1913,7 +1960,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                     PropertyAccessField::Expr(field) => {
                         let key = self.register_allocator.alloc();
                         self.compile_expr(field, &key);
-                        self.bytecode.emit_get_property_by_value(
+                        self.emit_get_property_by_value_ic(
                             dst.variable(),
                             key.variable(),
                             this.variable(),
@@ -1941,7 +1988,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                     PropertyAccessField::Expr(expr) => {
                         let key = self.register_allocator.alloc();
                         self.compile_expr(expr, &key);
-                        self.bytecode.emit_get_property_by_value(
+                        self.emit_get_property_by_value_ic(
                             dst.variable(),
                             key.variable(),
                             this.variable(),
@@ -2152,7 +2199,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                     PropertyAccessField::Expr(expr) => {
                         let key = self.register_allocator.alloc();
                         self.compile_expr(expr, &key);
-                        self.bytecode.emit_get_property_by_value(
+                        self.emit_get_property_by_value_ic(
                             value.variable(),
                             key.variable(),
                             value.variable(),
@@ -2843,6 +2890,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             handlers: self.handlers,
             flags: Cell::new(self.code_block_flags),
             ic: self.ic.into_boxed_slice(),
+            element_ic: self.element_ic.into_boxed_slice(),
             source_info: SourceInfo::new(
                 SourceMap::new(source_map_entries, self.source_path),
                 self.function_name,

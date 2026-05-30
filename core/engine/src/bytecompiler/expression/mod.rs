@@ -260,7 +260,7 @@ impl ByteCompiler<'_> {
                             PropertyAccessField::Expr(field) => {
                                 let key = self.register_allocator.alloc();
                                 self.compile_expr(field, &key);
-                                self.bytecode.emit_get_property_by_value(
+                                self.emit_get_property_by_value_ic(
                                     function.variable(),
                                     key.variable(),
                                     this.variable(),

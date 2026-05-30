@@ -5,9 +5,12 @@ use crate::vm::opcode::{IndexOperand, RegisterOperand};
 use crate::{
     Context, JsNativeError, JsResult,
     builtins::function::set_function_name,
-    object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
+    object::{
+        IndexedProperties, internal_methods::InternalMethodPropertyContext,
+        shape::slot::SlotAttributes,
+    },
     property::{PropertyDescriptor, PropertyKey},
-    vm::opcode::Operation,
+    vm::{DenseKind, opcode::Operation},
 };
 use boa_macros::js_str;
 
@@ -246,17 +249,68 @@ impl Operation for SetPropertyByName {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SetPropertyByValue;
 
+/// Map the current `IndexedProperties` kind to a [`DenseKind`] discriminant,
+/// or `None` if the storage is sparse.
+#[inline]
+fn indexed_properties_dense_kind(props: &IndexedProperties) -> Option<DenseKind> {
+    match props {
+        IndexedProperties::DenseI32(_) => Some(DenseKind::DenseI32),
+        IndexedProperties::DenseF64(_) => Some(DenseKind::DenseF64),
+        IndexedProperties::DenseElement(_) => Some(DenseKind::DenseElement),
+        IndexedProperties::SparseElement(_) | IndexedProperties::SparseProperty(_) => None,
+    }
+}
+
 impl SetPropertyByValue {
     #[inline(always)]
     pub(crate) fn operation(
-        (value, key, receiver, object): (
+        (value, key, receiver, object, ic_index): (
             RegisterOperand,
             RegisterOperand,
             RegisterOperand,
             RegisterOperand,
+            IndexOperand,
         ),
         context: &mut Context,
     ) -> JsResult<()> {
+        // --- Element-access IC fast path (set) ---
+        //
+        // When the key register holds a non-negative integer and the object
+        // register holds an object whose shape matches the element IC, try
+        // `set_dense_property` directly — skipping `to_object()`, `is_array()`,
+        // and `to_property_key`.
+        //
+        // `set_dense_property` returns `false` on out-of-bounds or sparse
+        // storage; in those cases we fall through to the slow path (which
+        // handles all the edge cases correctly). A false-positive IC hit
+        // (same shape, storage meanwhile went sparse) is a performance miss,
+        // not a correctness bug: `set_dense_property` will simply return `false`
+        // and we deopt correctly.
+        {
+            let key_val = context.vm.get_register(key.into());
+            if let JsVariant::Integer32(raw_key) = key_val.variant()
+                && raw_key >= 0
+            {
+                let obj_val = context.vm.get_register(object.into());
+                if let Some(obj_ref) = obj_val.as_object_borrowed() {
+                    let obj_borrow = obj_ref.borrow();
+                    let ic = &context.vm.frame().code_block().element_ic[usize::from(ic_index)];
+                    if ic.matches(obj_borrow.shape()).is_some() && obj_borrow.extensible {
+                        drop(obj_borrow);
+                        let val = context.vm.get_register(value.into()).clone();
+                        if obj_ref
+                            .borrow_mut()
+                            .properties_mut()
+                            .set_dense_property(raw_key as u32, &val)
+                        {
+                            return Ok(());
+                        }
+                        // Out-of-bounds or dense→sparse: fall through to slow path.
+                    }
+                }
+            }
+        }
+
         let value = context.vm.get_register(value.into()).clone();
         let key = context.vm.get_register(key.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
@@ -265,7 +319,8 @@ impl SetPropertyByValue {
 
         let key = key.to_property_key(context)?;
 
-        // Fast Path:
+        // Existing fast path — reached when the IC missed or the key is not
+        // an integer (e.g. a computed string key).
         'fast_path: {
             if object.is_array()
                 && let PropertyKey::Index(index) = &key
@@ -281,6 +336,16 @@ impl SetPropertyByValue {
                     .properties_mut()
                     .set_dense_property(index.get(), &value)
                 {
+                    // Seed the IC so future same-site same-shape writes can
+                    // hit the fast path above without calling to_object.
+                    let kind = indexed_properties_dense_kind(
+                        &object_borrowed.properties().indexed_properties,
+                    );
+                    drop(object_borrowed);
+                    if let Some(kind) = kind {
+                        let ic = &context.vm.frame().code_block().element_ic[usize::from(ic_index)];
+                        ic.seed(object.borrow().shape(), kind);
+                    }
                     return Ok(());
                 }
             }
