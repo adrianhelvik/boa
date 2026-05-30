@@ -515,11 +515,11 @@ fn element_ic_get_out_of_bounds_returns_undefined() -> JsResult<()> {
 
     // Warm the IC with an in-bounds access.
     let arr: JsValue = context.eval(Source::from_bytes("[10, 20]"))?;
-    let _ = function.call(
+    drop(function.call(
         &JsValue::undefined(),
         &[arr.clone(), JsValue::from(0_i32)],
         context,
-    )?;
+    )?);
     assert!(code.element_ic[0].dense_kind().is_some());
 
     // Out-of-bounds: IC hit check passes (same shape), but `get_dense_property`
