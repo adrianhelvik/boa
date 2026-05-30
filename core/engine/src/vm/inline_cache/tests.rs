@@ -695,12 +695,12 @@ fn call_ic_monomorphic_seeds_and_hits() -> JsResult<()> {
     assert!(code.call_ic[0].observed_callee().is_none());
 
     // Define a small callee.
-    let callee_val = context.eval(Source::from_bytes("(function add1(x) { return x + 1; })"))?;
+    let add1 = context.eval(Source::from_bytes("(function add1(x) { return x + 1; })"))?;
 
     // First call: slow path seeds the IC.
     let result = caller.call(
         &JsValue::undefined(),
-        &[callee_val.clone(), JsValue::from(41_i32)],
+        &[add1.clone(), JsValue::from(41_i32)],
         context,
     )?;
     assert_eq!(result, JsValue::from(42_i32));
@@ -715,7 +715,7 @@ fn call_ic_monomorphic_seeds_and_hits() -> JsResult<()> {
     // Second call: IC hit, same callee, correct result.
     let result = caller.call(
         &JsValue::undefined(),
-        &[callee_val.clone(), JsValue::from(10_i32)],
+        &[add1.clone(), JsValue::from(10_i32)],
         context,
     )?;
     assert_eq!(result, JsValue::from(11_i32));
@@ -892,12 +892,20 @@ fn call_ic_exception_propagates() -> JsResult<()> {
     ))?;
 
     // First call: slow path (cold IC), must propagate the error.
-    let r1 = caller.call(&JsValue::undefined(), &[thrower.clone()], context);
+    let r1 = caller.call(
+        &JsValue::undefined(),
+        std::slice::from_ref(&thrower),
+        context,
+    );
     assert!(r1.is_err(), "exception must propagate on cold path");
 
     // Second call: IC is seeded (if ordinary callee), fast path, still must
     // propagate the error.
-    let r2 = caller.call(&JsValue::undefined(), &[thrower.clone()], context);
+    let r2 = caller.call(
+        &JsValue::undefined(),
+        std::slice::from_ref(&thrower),
+        context,
+    );
     assert!(r2.is_err(), "exception must propagate on IC hit path");
 
     Ok(())
