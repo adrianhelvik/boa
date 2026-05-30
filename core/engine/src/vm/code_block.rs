@@ -18,7 +18,7 @@ use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
 use super::{
-    ElementIC, InlineCache,
+    CallIC, ElementIC, InlineCache,
     opcode::{Address, Bytecode, Instruction, InstructionIterator},
     source_info::{SourceInfo, SourceMap, SourcePath},
 };
@@ -166,6 +166,13 @@ pub struct CodeBlock {
     /// `base_class` clone on the hot path.
     pub(crate) element_ic: Box<[ElementIC]>,
 
+    /// Call-site inline caches — one entry per `Call` instruction. Monomorphic;
+    /// caches the observed callee object so that the `Call` handler can skip
+    /// the `is::<OrdinaryFunction>()` vtable-type check and the class-
+    /// constructor guard on the hot path. Also exposes the observed callee for
+    /// JIT Stage 2b monomorphic-call inlining feedback.
+    pub(crate) call_ic: Box<[CallIC]>,
+
     /// Bytecode to source code mapping.
     pub(crate) source_info: SourceInfo,
 
@@ -201,6 +208,7 @@ impl CodeBlock {
             handlers: ThinVec::default(),
             ic: Box::default(),
             element_ic: Box::default(),
+            call_ic: Box::default(),
             source_info: SourceInfo::new(
                 SourceMap::new(Box::default(), SourcePath::None),
                 name,
@@ -516,9 +524,13 @@ impl CodeBlock {
             | Instruction::PushScope { scope_index } => {
                 format!("scope_index:{scope_index}")
             }
-            Instruction::Call { argument_count }
-            | Instruction::New { argument_count }
-            | Instruction::SuperCall { argument_count } => {
+            Instruction::Call {
+                argument_count,
+                ic_index,
+            } => {
+                format!("argument_count:{argument_count} ic_index:{ic_index}")
+            }
+            Instruction::New { argument_count } | Instruction::SuperCall { argument_count } => {
                 format!("argument_count:{argument_count}")
             }
             Instruction::DefVar { binding_index } | Instruction::GetLocator { binding_index } => {

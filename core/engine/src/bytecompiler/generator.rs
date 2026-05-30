@@ -73,7 +73,7 @@ impl ByteCompiler<'_> {
         self.push_from_register(&iterator);
         self.push_from_register(is_return);
         self.push_from_register(value);
-        self.bytecode.emit_call(1u8.into());
+        self.emit_call_ic(1);
         self.bytecode.emit_store_true(is_return.variable());
         self.pop_into_register(value);
         let return_jump = self.jump();
@@ -83,7 +83,7 @@ impl ByteCompiler<'_> {
         self.push_from_register(&iterator);
         self.push_from_register(&next);
         self.push_from_register(value);
-        self.bytecode.emit_call(1u8.into());
+        self.emit_call_ic(1);
         self.bytecode.emit_store_false(is_return.variable());
         self.pop_into_register(value);
         let normal_jump = self.jump();
@@ -109,7 +109,7 @@ impl ByteCompiler<'_> {
         self.push_from_register(&iterator);
         self.push_from_register(is_return);
         self.push_from_register(value);
-        self.bytecode.emit_call(1u8.into());
+        self.emit_call_ic(1);
         self.bytecode.emit_store_false(is_return.variable());
         self.pop_into_register(value);
 

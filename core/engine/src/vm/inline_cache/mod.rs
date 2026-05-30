@@ -2,12 +2,15 @@ use arrayvec::ArrayVec;
 use itertools::Itertools;
 use std::{cell::Cell, fmt};
 
-use boa_gc::GcRefCell;
+use boa_gc::{GcRefCell, WeakGc};
 use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot},
+    object::{
+        ErasedVTableObject, JsObject,
+        shape::{Shape, WeakShape, slot::Slot},
+    },
 };
 
 #[cfg(test)]
@@ -145,6 +148,176 @@ impl ElementIC {
     #[allow(dead_code)] // consumed by JIT Stage 2
     pub(crate) fn dense_kind(&self) -> Option<DenseKind> {
         self.entry.borrow().as_ref().map(|e| e.dense_kind)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call-site inline cache
+// ---------------------------------------------------------------------------
+
+/// The seeded payload of a [`CallIC`]. Bundled into its own struct so that
+/// the unseeded state can be represented as `None` without requiring a
+/// sentinel pointer value.
+#[derive(Clone, Trace, Finalize)]
+struct CallICEntry {
+    /// Raw heap address of the cached callee's `GcRefCell<Object<T>>` field.
+    /// Used for the pointer-equality compare on the IC hot path. Must always
+    /// be read together with `callee.is_upgradable()` — see the GC-soundness
+    /// note on [`ElementICEntry::shape_addr`].
+    #[unsafe_ignore_trace]
+    callee_addr: usize,
+
+    /// Weak liveness guard for the cached callee object. Prevents a
+    /// false-positive hit after the GC reclaims and reuses the callee's
+    /// heap address for a different object.
+    callee: WeakGc<ErasedVTableObject>,
+}
+
+impl fmt::Debug for CallICEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `VTableObject` does not implement `Debug`; expose the raw address
+        // and liveness status instead, which is sufficient for diagnostics.
+        f.debug_struct("CallICEntry")
+            .field("callee_addr", &format_args!("{:#x}", self.callee_addr))
+            .field("callee_live", &self.callee.is_upgradable())
+            .finish()
+    }
+}
+
+/// A per-call-site inline cache for ordinary (`OrdinaryFunction`) callees.
+///
+/// ## Design
+///
+/// Monomorphic: caches the single most-recently-observed callee. On a hit
+/// (same live callee object), the `Call` handler can skip:
+///
+/// * the `is::<OrdinaryFunction>()` vtable-type check, and
+/// * the class-constructor guard (ordinary functions, not constructors, do
+///   not need this check on every call).
+///
+/// On a miss the IC is overwritten (last-write-wins) unless the site has
+/// already been marked megamorphic. A megamorphic site is effectively
+/// invisible to the IC — the generic path handles it every time.
+///
+/// ## GC soundness
+///
+/// Identical discipline to [`ElementIC`]: `callee_addr` (a raw integer) is
+/// always checked together with `callee.is_upgradable()` in [`CallIC::matches`].
+/// The two checks must never be separated — splitting them reintroduces the
+/// address-reuse false-positive.
+///
+/// ## JIT fuel
+///
+/// [`CallIC::observed_callee`] upgrades the weak reference and returns the
+/// callee `JsObject` if the IC is seeded and the callee is still live. JIT
+/// Stage 2b reads this to identify the monomorphic callee for inlining.
+/// [`CallIC::is_megamorphic`] tells the JIT that this site is not suitable
+/// for monomorphic inlining.
+#[derive(Clone, Debug, Trace, Finalize)]
+pub(crate) struct CallIC {
+    /// Cached callee entry, or `None` when the IC is unseeded (cold site).
+    entry: GcRefCell<Option<CallICEntry>>,
+
+    /// `true` once a second distinct callee has been observed. Permanently
+    /// prevents further seeding; the generic call path handles the site.
+    #[unsafe_ignore_trace]
+    megamorphic: Cell<bool>,
+}
+
+impl CallIC {
+    /// Return an empty (unseeded) IC.
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            entry: GcRefCell::new(None),
+            megamorphic: Cell::new(false),
+        }
+    }
+
+    /// Fused address + liveness check.
+    ///
+    /// Returns `true` iff the IC has a seeded entry whose callee object is
+    /// the same live object as `callee`, `false` on any miss (including the
+    /// unseeded and megamorphic states).
+    ///
+    /// The `megamorphic` check short-circuits first (non-seeding sites pay
+    /// zero cost after going mega). The `Option` unwrap short-circuits before
+    /// the address compare for the cold (unseeded) case.
+    ///
+    /// Not currently invoked on the call hot path — the `is::<OrdinaryFunction>()`
+    /// type check in the existing fast path is cheaper than the IC lookup would
+    /// be. Exposed for JIT Stage 2b consumers (e.g. a guard-then-inline pass)
+    /// and tests.
+    #[inline]
+    #[allow(dead_code)] // consumed by JIT Stage 2b + tests
+    pub(crate) fn matches(&self, callee: &JsObject) -> bool {
+        if self.megamorphic.get() {
+            return false;
+        }
+        let entry_ref = self.entry.borrow();
+        let Some(entry) = entry_ref.as_ref() else {
+            return false;
+        };
+        entry.callee_addr == callee.to_addr_usize() && entry.callee.is_upgradable()
+    }
+
+    /// Seed (or overwrite) the IC with the observed `callee`.
+    ///
+    /// If a previously seeded entry exists for a *different* callee, the site
+    /// transitions to megamorphic and subsequent calls bypass the IC entirely.
+    ///
+    /// Called on the slow path the first time a call site is executed, and
+    /// again whenever the callee changes (miss).
+    pub(crate) fn seed(&self, callee: &JsObject) {
+        if self.megamorphic.get() {
+            return;
+        }
+
+        let callee_addr = callee.to_addr_usize();
+        let mut entry_ref = self.entry.borrow_mut();
+
+        if let Some(existing) = entry_ref.as_ref() {
+            // A different live callee was previously observed → go megamorphic.
+            if existing.callee_addr != callee_addr && existing.callee.is_upgradable() {
+                self.megamorphic.set(true);
+                *entry_ref = None;
+                return;
+            }
+        }
+
+        *entry_ref = Some(CallICEntry {
+            callee_addr,
+            callee: WeakGc::new(callee.inner()),
+        });
+    }
+
+    /// Expose the cached callee for JIT Stage 2 feedback queries.
+    ///
+    /// Returns `Some(callee)` if the IC is seeded, the site is monomorphic,
+    /// and the cached callee is still live. Returns `None` otherwise (cold,
+    /// megamorphic, or collected callee).
+    ///
+    /// The JIT reads this to identify the single callee at a monomorphic call
+    /// site and emit a guard + inlined body for it.
+    #[inline]
+    #[allow(dead_code)] // consumed by JIT Stage 2b
+    pub(crate) fn observed_callee(&self) -> Option<JsObject> {
+        if self.megamorphic.get() {
+            return None;
+        }
+        let entry_ref = self.entry.borrow();
+        let entry = entry_ref.as_ref()?;
+        entry.callee.upgrade().map(JsObject::from_inner)
+    }
+
+    /// Returns `true` if the site has gone megamorphic.
+    ///
+    /// A megamorphic site saw more than one distinct callee and is not a
+    /// candidate for JIT monomorphic-call inlining.
+    #[inline]
+    #[allow(dead_code)] // consumed by JIT Stage 2b
+    pub(crate) fn is_megamorphic(&self) -> bool {
+        self.megamorphic.get()
     }
 }
 

@@ -1077,6 +1077,25 @@ impl<T: NativeObject> JsObject<T> {
         let ptr: *const _ = self.as_ref();
         PrivateName::new(description, ptr.cast::<()>() as usize)
     }
+
+    /// Return the heap address of this object as a `usize`, suitable for
+    /// use as a pointer-equality key in inline caches.
+    ///
+    /// The returned value is the address of the `GcRefCell<Object<T>>` field
+    /// inside the GC allocation — the same address used by [`private_name`].
+    /// It is unique per live object and stable for the object's lifetime.
+    ///
+    /// **Callers must pair this with a [`WeakGc`] liveness guard** (see
+    /// [`CallIC`]) to avoid false-positive matches after the GC reclaims and
+    /// reuses the allocation.
+    ///
+    /// [`private_name`]: JsObject::private_name
+    /// [`WeakGc`]: boa_gc::WeakGc
+    /// [`CallIC`]: crate::vm::inline_cache::CallIC
+    pub(crate) fn to_addr_usize(&self) -> usize {
+        let ptr: *const _ = self.as_ref();
+        ptr.cast::<()>() as usize
+    }
 }
 
 impl<T: NativeObject> JsObject<T> {

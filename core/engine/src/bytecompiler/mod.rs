@@ -44,7 +44,7 @@ use crate::{
     builtins::function::{ThisMode, arguments::MappedArguments},
     js_string,
     vm::{
-        CallFrame, CodeBlock, CodeBlockFlags, Constant, ElementIC, GeneratorResumeKind,
+        CallFrame, CallIC, CodeBlock, CodeBlockFlags, Constant, ElementIC, GeneratorResumeKind,
         GlobalFunctionBinding, Handler, InlineCache,
         opcode::{Address, BindingOpcode, BytecodeEmitter, RegisterOperand},
         source_info::{SourceInfo, SourceMap, SourceMapBuilder, SourcePath},
@@ -533,6 +533,7 @@ pub struct ByteCompiler<'ctx> {
     handlers: ThinVec<Handler>,
     pub(crate) ic: Vec<InlineCache>,
     pub(crate) element_ic: Vec<ElementIC>,
+    pub(crate) call_ic: Vec<CallIC>,
     literals_map: FxHashMap<Literal, u32>,
     names_map: FxHashMap<Sym, u32>,
     bindings_map: FxHashMap<BindingLocator, u32>,
@@ -664,6 +665,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             handlers: ThinVec::default(),
             ic: Vec::default(),
             element_ic: Vec::default(),
+            call_ic: Vec::default(),
 
             literals_map: FxHashMap::default(),
             names_map: FxHashMap::default(),
@@ -1042,6 +1044,18 @@ impl<'ctx> ByteCompiler<'ctx> {
         self.element_ic.push(ElementIC::new());
         self.bytecode
             .emit_set_property_by_value(value, key, receiver, object, ic_index.into());
+    }
+
+    /// Emit a `Call` instruction with a freshly allocated call-site IC entry.
+    ///
+    /// Every `Call` site gets its own [`CallIC`] so that the interpreter can
+    /// track the observed callee per site and expose the feedback to JIT
+    /// Stage 2b monomorphic-call inlining.
+    fn emit_call_ic(&mut self, argument_count: u32) {
+        let ic_index = self.call_ic.len() as u32;
+        self.call_ic.push(CallIC::new());
+        self.bytecode
+            .emit_call(argument_count.into(), ic_index.into());
     }
 
     fn emit_get_property_by_name(
@@ -2253,7 +2267,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                     for arg in args {
                         self.compile_expr_to_stack(arg);
                     }
-                    self.bytecode.emit_call((args.len() as u32).into());
+                    self.emit_call_ic(args.len() as u32);
                 }
 
                 self.pop_into_register(value);
@@ -2839,9 +2853,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             }
             CallKind::Call if contains_spread => compiler.bytecode.emit_call_spread(),
             CallKind::Call => {
-                compiler
-                    .bytecode
-                    .emit_call((call.args().len() as u32).into());
+                compiler.emit_call_ic(call.args().len() as u32);
             }
             CallKind::New if contains_spread => compiler.bytecode.emit_new_spread(),
             CallKind::New => compiler
@@ -2891,6 +2903,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             flags: Cell::new(self.code_block_flags),
             ic: self.ic.into_boxed_slice(),
             element_ic: self.element_ic.into_boxed_slice(),
+            call_ic: self.call_ic.into_boxed_slice(),
             source_info: SourceInfo::new(
                 SourceMap::new(source_map_entries, self.source_path),
                 self.function_name,

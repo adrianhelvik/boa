@@ -183,7 +183,10 @@ pub(crate) struct Call;
 
 impl Call {
     #[inline(always)]
-    pub(super) fn operation(argument_count: IndexOperand, context: &mut Context) -> JsResult<()> {
+    pub(super) fn operation(
+        (argument_count, ic_index): (IndexOperand, IndexOperand),
+        context: &mut Context,
+    ) -> JsResult<()> {
         let argument_count = usize::from(argument_count);
         let func = context
             .vm
@@ -202,13 +205,27 @@ impl Call {
         // call: building a `CallValue::Pending` (which clones the callee
         // `JsObject` and captures a `NativeSourceInfo`), the `resolve()` loop,
         // and the indirect dispatch through the internal-methods vtable —
-        // and it lets `function_call` inline into this handler. This is the
-        // interpreter-tier analogue of a monomorphic call inline cache.
+        // and it lets `function_call` inline into this handler.
+        //
+        // After the `is::<OrdinaryFunction>()` type check succeeds, we seed
+        // (or update) the per-call-site `CallIC` with the observed callee.
+        // The IC is **observational** — it does not alter the call path
+        // today, but it records the callee identity so that JIT Stage 2b can
+        // identify monomorphic sites and inline them. The seeding cost is
+        // bounded to the `is::<OrdinaryFunction>()` taken branch, which runs
+        // on every call for ordinary functions regardless.
         //
         // SAFETY/correctness: anything that is not an `OrdinaryFunction` falls
         // through to the generic `__call__` path unchanged, so bound/proxy/
-        // native callees keep their exact semantics.
+        // native callees keep their exact semantics and never seed the IC.
         if object.is::<OrdinaryFunction>() {
+            // Record the observed callee for JIT Stage 2b feedback. The IC
+            // transitions to megamorphic if a second distinct callee is seen,
+            // permanently suppressing further seeding.
+            {
+                let ic = &context.vm.frame().code_block().call_ic[usize::from(ic_index)];
+                ic.seed(&object);
+            }
             return crate::builtins::function::function_call(
                 &object,
                 argument_count,

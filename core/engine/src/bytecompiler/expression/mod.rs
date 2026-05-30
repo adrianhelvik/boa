@@ -333,8 +333,7 @@ impl ByteCompiler<'_> {
                     self.compile_expr_to_stack(expr);
                 }
 
-                self.bytecode
-                    .emit_call((template.exprs().len() as u32 + 1).into());
+                self.emit_call_ic(template.exprs().len() as u32 + 1);
                 self.pop_into_register(dst);
             }
             Expression::ClassExpression(class) => {

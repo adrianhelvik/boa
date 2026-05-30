@@ -1917,8 +1917,12 @@ generate_opcodes! {
     ///
     /// - Operands:
     ///   - argument_count: `IndexOperand`
+    ///   - ic_index: `IndexOperand` — index into `CodeBlock::call_ic`
     /// - Stack: this, func, argument_1, ... argument_n **=>** result
-    Call { argument_count: IndexOperand },
+    Call {
+        argument_count: IndexOperand,
+        ic_index: IndexOperand,
+    },
 
     /// Call a function where the arguments contain spreads.
     ///

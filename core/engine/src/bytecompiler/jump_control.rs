@@ -177,7 +177,7 @@ impl JumpRecord {
                                 );
                                 compiler.push_from_register(&exception);
                                 compiler.register_allocator.dealloc(exception);
-                                compiler.bytecode.emit_call(1u8.into());
+                                compiler.emit_call_ic(1);
                             },
                             |compiler| {
                                 // has_exception == false, call `resolve` normally.
@@ -194,7 +194,7 @@ impl JumpRecord {
                                     compiler.push_from_register(&value);
                                     compiler.register_allocator.dealloc(value);
                                 }
-                                compiler.bytecode.emit_call(1u8.into());
+                                compiler.emit_call_ic(1);
                             },
                         );
 

@@ -10,7 +10,7 @@ use crate::{
         shape::slot::SlotAttributes,
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
-    vm::{CodeBlock, DenseKind},
+    vm::{CallIC, CodeBlock, DenseKind},
 };
 
 #[test]
@@ -664,4 +664,295 @@ fn element_ic_get_sparse_array_correct() -> JsResult<()> {
     assert_eq!(result, JsValue::from(3_i32));
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Call-site IC tests
+// ---------------------------------------------------------------------------
+
+/// Helper: extract the code block from a JS function value.
+fn get_call_codeblock(value: &JsValue) -> Option<(JsObject, Gc<CodeBlock>)> {
+    let object = value.as_object()?.clone();
+    let code = object.downcast_ref::<OrdinaryFunction>()?.code.clone();
+    Some((object, code))
+}
+
+/// Monomorphic call: a single callee called repeatedly should seed the IC on
+/// the first call and hit it on subsequent calls, with correct results.
+#[test]
+fn call_ic_monomorphic_seeds_and_hits() -> JsResult<()> {
+    let context = &mut Context::default();
+    // `caller` calls `callee(x)`. The compiler emits one `Call` instruction,
+    // so `call_ic` will have exactly one entry.
+    let caller_val = context.eval(Source::from_bytes(
+        "(function caller(callee, x) { return callee(x); })",
+    ))?;
+    let (caller, code) = get_call_codeblock(&caller_val).expect("should be a function");
+    assert_eq!(code.call_ic.len(), 1, "one Call site → one CallIC entry");
+
+    // IC is unseeded before the first call.
+    assert!(!code.call_ic[0].is_megamorphic());
+    assert!(code.call_ic[0].observed_callee().is_none());
+
+    // Define a small callee.
+    let callee_val = context.eval(Source::from_bytes("(function add1(x) { return x + 1; })"))?;
+
+    // First call: slow path seeds the IC.
+    let result = caller.call(
+        &JsValue::undefined(),
+        &[callee_val.clone(), JsValue::from(41_i32)],
+        context,
+    )?;
+    assert_eq!(result, JsValue::from(42_i32));
+
+    // IC should now be seeded with the callee.
+    assert!(
+        code.call_ic[0].observed_callee().is_some(),
+        "IC should be seeded after first call"
+    );
+    assert!(!code.call_ic[0].is_megamorphic());
+
+    // Second call: IC hit, same callee, correct result.
+    let result = caller.call(
+        &JsValue::undefined(),
+        &[callee_val.clone(), JsValue::from(10_i32)],
+        context,
+    )?;
+    assert_eq!(result, JsValue::from(11_i32));
+
+    Ok(())
+}
+
+/// Polymorphic call site: two different callees → IC goes megamorphic.
+/// The generic path must still produce correct results.
+#[test]
+fn call_ic_polymorphic_goes_megamorphic() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes(
+        "(function caller(f, x) { return f(x); })",
+    ))?;
+    let (caller, code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    let add1 = context.eval(Source::from_bytes("(function add1(x) { return x + 1; })"))?;
+    let mul2 = context.eval(Source::from_bytes("(function mul2(x) { return x * 2; })"))?;
+
+    // First call with add1: seeds IC.
+    let r1 = caller.call(
+        &JsValue::undefined(),
+        &[add1.clone(), JsValue::from(5_i32)],
+        context,
+    )?;
+    assert_eq!(r1, JsValue::from(6_i32));
+    assert!(!code.call_ic[0].is_megamorphic());
+
+    // Second call with a different callee (mul2): IC should go megamorphic.
+    let r2 = caller.call(
+        &JsValue::undefined(),
+        &[mul2.clone(), JsValue::from(5_i32)],
+        context,
+    )?;
+    assert_eq!(r2, JsValue::from(10_i32), "correct result despite IC miss");
+    assert!(
+        code.call_ic[0].is_megamorphic(),
+        "IC should be megamorphic after seeing two distinct callees"
+    );
+
+    // Third call (either callee): still correct even though IC is megamorphic.
+    let r3 = caller.call(
+        &JsValue::undefined(),
+        &[add1.clone(), JsValue::from(99_i32)],
+        context,
+    )?;
+    assert_eq!(r3, JsValue::from(100_i32));
+
+    Ok(())
+}
+
+/// Arity mismatch: calling a function with fewer or more arguments than its
+/// parameter list specifies. JS semantics allow this; the call must succeed
+/// with correct JS results (extras ignored, missing become `undefined`).
+#[test]
+fn call_ic_arity_mismatch_correct() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes(
+        "(function caller(f, a, b) { return f(a, b); })",
+    ))?;
+    let (caller, _code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    // callee only accepts one parameter; the second is silently ignored.
+    let f = context.eval(Source::from_bytes("(function f(x) { return x + 1; })"))?;
+    let result = caller.call(
+        &JsValue::undefined(),
+        &[f.clone(), JsValue::from(3_i32), JsValue::from(9999_i32)],
+        context,
+    )?;
+    assert_eq!(result, JsValue::from(4_i32));
+
+    Ok(())
+}
+
+/// Recursion: a function calling itself repeatedly. The IC should see the
+/// same callee (the recursive function) on every iteration and stay
+/// monomorphic.
+#[test]
+fn call_ic_recursive_stays_monomorphic() -> JsResult<()> {
+    let context = &mut Context::default();
+    let result = context.eval(Source::from_bytes(
+        r"
+        function fact(n) {
+            if (n <= 1) return 1;
+            return n * fact(n - 1);
+        }
+        fact(8)
+        ",
+    ))?;
+    assert_eq!(result, JsValue::from(40320_i32));
+    Ok(())
+}
+
+/// Non-function callee: must produce a `TypeError`, not invoke the IC fast
+/// path or panic.
+#[test]
+fn call_ic_non_function_throws_type_error() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes("(function caller(f) { return f(); })"))?;
+    let (caller, _code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    let result = caller.call(&JsValue::undefined(), &[JsValue::from(42_i32)], context);
+    assert!(
+        result.is_err(),
+        "calling a non-function must throw TypeError"
+    );
+
+    Ok(())
+}
+
+/// Native (built-in) callee: must NOT seed the IC (only ordinary JS
+/// functions seed the IC) and must produce the correct result.
+#[test]
+fn call_ic_native_callee_deopt_correct() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes(
+        "(function caller(f, x) { return f(x); })",
+    ))?;
+    let (caller, code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    // `Math.abs` is a native function.
+    let math_abs = context.eval(Source::from_bytes("Math.abs"))?;
+    let result = caller.call(
+        &JsValue::undefined(),
+        &[math_abs.clone(), JsValue::from(-7_i32)],
+        context,
+    )?;
+    assert_eq!(result, JsValue::from(7_i32));
+
+    // IC should NOT be seeded for native callees.
+    assert!(
+        code.call_ic[0].observed_callee().is_none(),
+        "native callee must not seed the IC"
+    );
+    assert!(!code.call_ic[0].is_megamorphic());
+
+    Ok(())
+}
+
+/// Bound function callee: must NOT seed the IC and must produce the correct
+/// result via the generic `__call__` path.
+#[test]
+fn call_ic_bound_function_deopt_correct() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes("(function caller(f) { return f(); })"))?;
+    let (caller, code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    let bound = context.eval(Source::from_bytes(
+        "(function add(a, b) { return a + b; }).bind(null, 10, 32)",
+    ))?;
+    let result = caller.call(&JsValue::undefined(), &[bound], context)?;
+    assert_eq!(result, JsValue::from(42_i32));
+
+    // Bound functions are not OrdinaryFunctions; IC stays unseeded.
+    assert!(
+        code.call_ic[0].observed_callee().is_none(),
+        "bound function must not seed the IC"
+    );
+
+    Ok(())
+}
+
+/// Exception propagation: an exception thrown inside the called function must
+/// propagate correctly through the IC fast path and the deopt path.
+#[test]
+fn call_ic_exception_propagates() -> JsResult<()> {
+    let context = &mut Context::default();
+    let caller_val = context.eval(Source::from_bytes("(function caller(f) { return f(); })"))?;
+    let (caller, _code) = get_call_codeblock(&caller_val).expect("should be a function");
+
+    let thrower = context.eval(Source::from_bytes(
+        "(function thrower() { throw new Error('bang'); })",
+    ))?;
+
+    // First call: slow path (cold IC), must propagate the error.
+    let r1 = caller.call(&JsValue::undefined(), &[thrower.clone()], context);
+    assert!(r1.is_err(), "exception must propagate on cold path");
+
+    // Second call: IC is seeded (if ordinary callee), fast path, still must
+    // propagate the error.
+    let r2 = caller.call(&JsValue::undefined(), &[thrower.clone()], context);
+    assert!(r2.is_err(), "exception must propagate on IC hit path");
+
+    Ok(())
+}
+
+/// `CallIC::matches` / `seed` unit test: verify the low-level IC mechanics
+/// without going through the full VM.
+#[test]
+fn call_ic_unit_matches_and_seed() {
+    let context = &mut Context::default();
+
+    // Create two distinct JsObjects so we can test identity comparison.
+    let obj1 = context
+        .intrinsics()
+        .templates()
+        .ordinary_object()
+        .create(OrdinaryObject, Vec::default());
+    let obj2 = context
+        .intrinsics()
+        .templates()
+        .ordinary_object()
+        .create(OrdinaryObject, Vec::default());
+
+    let ic = CallIC::new();
+
+    // Unseeded: matches nothing.
+    assert!(!ic.matches(&obj1));
+    assert!(!ic.matches(&obj2));
+    assert!(ic.observed_callee().is_none());
+    assert!(!ic.is_megamorphic());
+
+    // Seed with obj1.
+    ic.seed(&obj1);
+    assert!(ic.matches(&obj1), "seeded IC must hit on the same object");
+    assert!(
+        !ic.matches(&obj2),
+        "seeded IC must miss on a different object"
+    );
+
+    // Seed with obj2 (different object) → megamorphic.
+    ic.seed(&obj2);
+    assert!(
+        ic.is_megamorphic(),
+        "IC must go megamorphic after seeing two distinct objects"
+    );
+    assert!(
+        !ic.matches(&obj1),
+        "megamorphic IC must always return false"
+    );
+    assert!(
+        !ic.matches(&obj2),
+        "megamorphic IC must always return false"
+    );
+    assert!(
+        ic.observed_callee().is_none(),
+        "megamorphic IC has no observed callee"
+    );
 }
