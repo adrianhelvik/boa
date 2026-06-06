@@ -143,13 +143,23 @@ impl UniqueShape {
 
         let index = *index as usize;
 
-        // If property does not change type, there is no need to shift.
+        // If property does not change type (same storage width), there is no need
+        // to shift slots — but we must STILL hand back a fresh shape with a new
+        // heap address so that any inline cache keyed on the old shape pointer
+        // misses and re-reads the changed attributes. Returning `self.clone()`
+        // here (same address) let a write IC keep treating a property as writable
+        // after `Object.defineProperty(obj, k, { writable: false })`, allowing a
+        // write that must throw (strict) / no-op (sloppy) to silently succeed.
         if slot.attributes.width_match(key.attributes) {
             slot.attributes = key.attributes;
             property_table.keys[index].1.attributes = key.attributes;
-            // TODO: invalidate the pointer.
+            // Move the table into a brand-new unique shape (fresh Gc allocation),
+            // mirroring `change_prototype_transition` / the type-changing branch.
+            let property_table = std::mem::take(&mut *property_table);
+            let prototype = self.inner.prototype.borrow_mut().take();
+            let shape = Self::new(prototype, property_table);
             return ChangeTransition {
-                shape: self.clone().into(),
+                shape: shape.into(),
                 action: ChangeTransitionAction::Nothing,
             };
         }
