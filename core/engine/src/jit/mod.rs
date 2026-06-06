@@ -62,6 +62,11 @@ fn same_frame_jump_target(instr: &Instruction) -> Option<u32> {
 /// real tier will hold one of these per realm.
 pub struct JitBackend {
     module: JITModule,
+    /// Monotonic counter for unique symbol names. `JITModule::declare_function`
+    /// deduplicates by name, so reusing a fixed name (e.g. "jit_codeblock")
+    /// across compilations makes the second `define_function` fail with
+    /// `DuplicateDefinition`. Each compile gets a fresh name from this counter.
+    next_fn_id: u64,
 }
 
 impl std::fmt::Debug for JitBackend {
@@ -89,7 +94,17 @@ impl JitBackend {
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         Self {
             module: JITModule::new(builder),
+            next_fn_id: 0,
         }
+    }
+
+    /// Allocate a process-unique-within-this-backend symbol name for a freshly
+    /// compiled function. Prevents `DuplicateDefinition` when the same backend
+    /// compiles more than one function (or the same `CodeBlock` twice).
+    fn next_fn_name(&mut self, prefix: &str) -> String {
+        let id = self.next_fn_id;
+        self.next_fn_id += 1;
+        format!("{prefix}_{id}")
     }
 
     /// Compile a function `extern "C" fn(*mut Context) -> i64` whose body is a
@@ -135,9 +150,10 @@ impl JitBackend {
             bcx.finalize();
         }
 
+        let name = self.next_fn_name("ctx_thunk");
         let id = self
             .module
-            .declare_function("ctx_thunk", Linkage::Export, &ctx.func.signature)
+            .declare_function(&name, Linkage::Export, &ctx.func.signature)
             .expect("declare");
         self.module.define_function(id, &mut ctx).expect("define");
         self.module.clear_context(&mut ctx);
@@ -300,9 +316,10 @@ impl JitBackend {
             bcx.finalize();
         }
 
+        let name = self.next_fn_name("jit_codeblock");
         let id = self
             .module
-            .declare_function("jit_codeblock", Linkage::Export, &cctx.func.signature)
+            .declare_function(&name, Linkage::Export, &cctx.func.signature)
             .expect("declare");
         self.module.define_function(id, &mut cctx).expect("define");
         self.module.clear_context(&mut cctx);
@@ -409,6 +426,28 @@ mod tests {
 
         assert_eq!(jit.as_i32(), Some(15));
         assert_eq!(interp.as_i32(), jit.as_i32());
+    }
+
+    #[test]
+    fn jit_backend_can_be_reused_across_compilations() {
+        // Regression: `compile_codeblock` previously declared every emitted
+        // function with the fixed name "jit_codeblock". Because
+        // `JITModule::declare_function` dedups by name, the second compilation
+        // on the same backend panicked in `define_function` with
+        // `DuplicateDefinition`. A backend must compile many scripts.
+        let mut backend = JitBackend::new();
+
+        let mut c1 = Context::default();
+        let s1 = crate::Script::parse(crate::Source::from_bytes("1 + 1"), None, &mut c1)
+            .expect("parse");
+        let r1 = s1.evaluate_jit(&mut c1, &mut backend).expect("jit #1");
+        assert_eq!(r1.as_i32(), Some(2));
+
+        let mut c2 = Context::default();
+        let s2 = crate::Script::parse(crate::Source::from_bytes("20 + 22"), None, &mut c2)
+            .expect("parse");
+        let r2 = s2.evaluate_jit(&mut c2, &mut backend).expect("jit #2 (must not panic)");
+        assert_eq!(r2.as_i32(), Some(42));
     }
 
     /// Run `src` through both the interpreter and the JIT and assert identical
