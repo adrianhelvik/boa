@@ -648,8 +648,14 @@ impl Module {
     #[allow(dropping_copy_types)]
     #[inline]
     pub fn load_link_evaluate(&self, context: &mut Context) -> JsPromise {
+        // Use `then_intrinsic` rather than the public `then`: these are internal module-lifecycle
+        // steps that the spec performs against `%Promise%` directly. The public `then` resolves the
+        // result promise via `SpeciesConstructor`, which reads `constructor`/`@@species` off the
+        // prototype chain — values that remote documents routinely replace via Promise polyfills.
+        // A hijacked species constructor returns a non-native thenable, making `then` fail and
+        // panic, which would take down the whole embedder. `then_intrinsic` cannot be hijacked.
         self.load(context)
-            .then(
+            .then_intrinsic(
                 Some(
                     NativeFunction::from_copy_closure_with_captures(
                         |_, _, module, context| {
@@ -663,8 +669,7 @@ impl Module {
                 None,
                 context,
             )
-            .expect("`then` cannot fail for a native `JsPromise`")
-            .then(
+            .then_intrinsic(
                 Some(
                     NativeFunction::from_copy_closure_with_captures(
                         |_, _, module, context| Ok(module.evaluate(context)?.into()),
@@ -675,7 +680,6 @@ impl Module {
                 None,
                 context,
             )
-            .expect("`then` cannot fail for a native `JsPromise`")
     }
 
     /// Abstract operation [`GetModuleNamespace ( module )`][spec].
@@ -978,4 +982,48 @@ fn test_module_request_attribute_sorting() {
     assert_eq!(request1, request2);
     assert_eq!(request1.attributes()[0].key(), &js_string!("key1"));
     assert_eq!(request1.attributes()[1].key(), &js_string!("key2"));
+}
+
+/// Regression test: a document that replaces `Promise[Symbol.species]` with a constructor that
+/// produces a non-native thenable must not be able to crash module evaluation.
+///
+/// `load_link_evaluate` chains internal continuations onto the module's load promise. If those
+/// continuations resolve their result promise via the observable `SpeciesConstructor` path (as the
+/// public `Promise.prototype.then` does), a hijacked species constructor yields a non-native object
+/// and the `then` wrapper panics — taking down the whole embedder. This reproduces a real crash hit
+/// while loading sites whose bundles ship Promise polyfills. The fix routes those steps through the
+/// `%Promise%` intrinsic (`then_intrinsic`), which cannot be hijacked.
+#[test]
+fn module_evaluation_survives_hijacked_promise_species() {
+    use boa_engine::builtins::promise::PromiseState;
+    use boa_engine::{Context, JsValue, Module, Source};
+
+    let mut context = Context::default();
+
+    // Mimic a Promise polyfill / subclass that makes the derived promise a plain (non-native)
+    // object. `@@species` is normally a getter returning `this`; redefining it to hand back this
+    // constructor is enough to poison every internal `.then`.
+    context
+        .eval(Source::from_bytes(
+            br#"
+            function Evil(executor) {
+                executor(function () {}, function () {});
+            }
+            Object.defineProperty(Promise, Symbol.species, {
+                configurable: true,
+                get() { return Evil; },
+            });
+        "#,
+        ))
+        .expect("hijack setup should not throw");
+
+    let module = Module::parse(Source::from_bytes(b"export const x = 1;"), None, &mut context)
+        .expect("module should parse");
+
+    // Before the fix this call panics with "`object` is not a Promise"; afterwards it returns a
+    // native promise that settles normally.
+    let promise = module.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+
+    assert_eq!(promise.state(), PromiseState::Fulfilled(JsValue::undefined()));
 }

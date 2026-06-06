@@ -6,7 +6,7 @@ use crate::{
     Context, JsArgs, JsError, JsExpect, JsNativeError, JsResult, JsValue, NativeFunction,
     builtins::{
         Promise,
-        promise::{PromiseState, ResolvingFunctions},
+        promise::{PromiseCapability, PromiseState, ResolvingFunctions},
     },
     job::NativeAsyncJob,
     object::JsObject,
@@ -569,6 +569,41 @@ impl JsPromise {
             .and_then(Self::from_object)
             .js_expect("`inner_then` cannot fail for native `JsPromise`")
             .map_err(Into::into)
+    }
+
+    /// Schedules callbacks like [`JsPromise::then`], but always builds the resulting promise from
+    /// the `%Promise%` intrinsic instead of going through the observable `@@species` lookup.
+    ///
+    /// [`JsPromise::then`] mirrors `Promise.prototype.then`, so it resolves the result promise's
+    /// constructor via `SpeciesConstructor`. That reads `this.constructor` and
+    /// `constructor[@@species]` off the prototype chain, both of which user code can replace
+    /// (Promise polyfills such as core-js / zone.js do exactly this). When the species constructor
+    /// yields a non-native thenable, `from_object` fails and the public `then` panics. Internal
+    /// engine machinery (module loading, etc.) must not be hijackable that way, and the spec
+    /// itself uses `NewPromiseCapability(%Promise%)` — not `SpeciesConstructor` — for those steps.
+    ///
+    /// This variant is infallible: the `%Promise%` intrinsic always produces a native promise.
+    pub(crate) fn then_intrinsic(
+        &self,
+        on_fulfilled: Option<JsFunction>,
+        on_rejected: Option<JsFunction>,
+        context: &mut Context,
+    ) -> Self {
+        let promise_constructor = context.intrinsics().constructors().promise().constructor();
+        let result_capability = PromiseCapability::new(&promise_constructor, context)
+            .expect("capability creation must always succeed when using the `%Promise%` intrinsic");
+        let result_promise = result_capability.promise().clone();
+
+        Promise::perform_promise_then(
+            &self.inner,
+            on_fulfilled,
+            on_rejected,
+            Some(result_capability),
+            context,
+        );
+
+        Self::from_object(result_promise)
+            .expect("promise created from the `%Promise%` intrinsic is always native")
     }
 
     /// Schedules a callback to run when the promise is rejected.
