@@ -438,15 +438,17 @@ mod tests {
         let mut backend = JitBackend::new();
 
         let mut c1 = Context::default();
-        let s1 = crate::Script::parse(crate::Source::from_bytes("1 + 1"), None, &mut c1)
-            .expect("parse");
+        let s1 =
+            crate::Script::parse(crate::Source::from_bytes("1 + 1"), None, &mut c1).expect("parse");
         let r1 = s1.evaluate_jit(&mut c1, &mut backend).expect("jit #1");
         assert_eq!(r1.as_i32(), Some(2));
 
         let mut c2 = Context::default();
         let s2 = crate::Script::parse(crate::Source::from_bytes("20 + 22"), None, &mut c2)
             .expect("parse");
-        let r2 = s2.evaluate_jit(&mut c2, &mut backend).expect("jit #2 (must not panic)");
+        let r2 = s2
+            .evaluate_jit(&mut c2, &mut backend)
+            .expect("jit #2 (must not panic)");
         assert_eq!(r2.as_i32(), Some(42));
     }
 

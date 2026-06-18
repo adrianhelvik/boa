@@ -1017,13 +1017,20 @@ fn module_evaluation_survives_hijacked_promise_species() {
         ))
         .expect("hijack setup should not throw");
 
-    let module = Module::parse(Source::from_bytes(b"export const x = 1;"), None, &mut context)
-        .expect("module should parse");
+    let module = Module::parse(
+        Source::from_bytes(b"export const x = 1;"),
+        None,
+        &mut context,
+    )
+    .expect("module should parse");
 
     // Before the fix this call panics with "`object` is not a Promise"; afterwards it returns a
     // native promise that settles normally.
     let promise = module.load_link_evaluate(&mut context);
     context.run_jobs().unwrap();
 
-    assert_eq!(promise.state(), PromiseState::Fulfilled(JsValue::undefined()));
+    assert_eq!(
+        promise.state(),
+        PromiseState::Fulfilled(JsValue::undefined())
+    );
 }
