@@ -29,6 +29,33 @@ fn empty_let_decl_undefined() {
 }
 
 #[test]
+fn deeply_nested_expression_does_not_overflow_stack() {
+    // Regression: deeply nested expressions used to overflow the native stack
+    // while parsing (recursive descent burns ~one frame per operator-precedence
+    // level, per nesting level) and again while compiling the AST to bytecode,
+    // aborting the whole process. Real-world minified bundles (e.g. Vue's
+    // chunk-vendors.js) hit this. The on-demand stack-growth guards must let it
+    // parse, compile, and evaluate instead. This runs on `cargo test`'s small
+    // (~2 MiB) thread stack, which overflows only ~a dozen of the heavy
+    // parenthesized levels deep without the guards — far below `DEPTH`.
+    const DEPTH: usize = 1000;
+
+    // Parenthesized groups exercise the heavy parser path (the `(` cover grammar
+    // with arrow-parameter disambiguation, ~156 KiB of stack per level).
+    let parens = format!("{}42{}", "(".repeat(DEPTH), ")".repeat(DEPTH));
+    run_test_actions([TestAction::assert_eq(parens, 42)]);
+
+    // Nested array literals keep the depth in the AST too, so this also exercises
+    // the bytecompiler's recursive `compile_expr` walk.
+    let arrays = format!(
+        "let v = {open}42{close}; while (Array.isArray(v)) {{ v = v[0]; }} v",
+        open = "[".repeat(DEPTH),
+        close = "]".repeat(DEPTH),
+    );
+    run_test_actions([TestAction::assert_eq(arrays, 42)]);
+}
+
+#[test]
 fn semicolon_expression_stop() {
     run_test_actions([TestAction::assert_eq(
         indoc! {r#"

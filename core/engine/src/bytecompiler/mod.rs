@@ -1793,7 +1793,15 @@ impl<'ctx> ByteCompiler<'ctx> {
     /// Compile an [`Expression`].
     #[inline]
     pub(crate) fn compile_expr(&mut self, expr: &Expression, dst: &'_ Register) {
-        self.compile_expr_impl(expr, dst);
+        // Guard against native-stack overflow on deeply nested expressions: the
+        // AST walk recurses one frame per nesting level, so a deep-but-valid tree
+        // (common in minified bundles) would otherwise abort the process. Grow the
+        // stack on demand instead — mirrors the parser-side guard. Once parsing
+        // can build such trees, compilation must survive them too. The red zone
+        // must exceed one level's frame cost (see boa_parser's STACK_RED_ZONE).
+        stacker::maybe_grow(1024 * 1024, 8 * 1024 * 1024, || {
+            self.compile_expr_impl(expr, dst);
+        });
     }
 
     /// Compile an expression purely for its side effects, discarding the result.

@@ -37,6 +37,36 @@ use self::statement::ModuleItemList;
 type ScriptParseOutput = (boa_ast::Script, boa_ast::SourceText);
 type ModuleParseOutput = (boa_ast::Module, boa_ast::SourceText);
 
+/// Red zone for [`maybe_grow_stack`]: grow when less than this much native stack
+/// remains.
+///
+/// This MUST exceed the stack a single nesting level consumes between two
+/// consecutive guard calls, or the guard is useless — `stacker` would see "free
+/// space > red zone, no need to grow", then the next level blows past the red
+/// zone and off the end of the stack before the following check can fire. One
+/// expression nesting level walks the full ~26-deep operator-precedence chain,
+/// and boa's parser frames are large (the `(` cover-grammar path in particular,
+/// with its arrow-parameter disambiguation), measured at ~156 KiB per level on
+/// aarch64. 1 MiB leaves a generous margin.
+pub(crate) const STACK_RED_ZONE: usize = 1024 * 1024;
+
+/// New native-stack segment size for [`maybe_grow_stack`]. Several times
+/// [`STACK_RED_ZONE`] so each freshly grown segment fits many nesting levels.
+pub(crate) const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+
+/// Run `f` on a guaranteed-large native stack, growing it on demand.
+///
+/// The recursive-descent parser burns roughly one frame per operator-precedence
+/// level (~26 of them) for every nesting level of an expression. Deeply nested —
+/// but valid — input (common in minified bundles: nested arrays, call-argument
+/// chains, chained ternaries, parenthesized groups) would otherwise run off the
+/// fixed main-thread stack and `abort()` the whole process. Calling this at each
+/// AST-recursion reentry point lets the stack grow segment-by-segment instead.
+#[inline]
+pub(crate) fn maybe_grow_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, f)
+}
+
 /// Trait implemented by parsers.
 ///
 /// This makes it possible to abstract over the underlying implementation of a parser.

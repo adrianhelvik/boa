@@ -144,6 +144,7 @@ pastey.workspace = true
 thiserror.workspace = true
 dashmap.workspace = true
 num_enum.workspace = true
+stacker.workspace = true
 thin-vec.workspace = true
 itertools = { workspace = true, default-features = false, features = ["use_alloc"] }
 icu_normalizer = { workspace = true, features = [

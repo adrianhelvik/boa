@@ -15,6 +15,16 @@ mod with;
 impl ByteCompiler<'_> {
     /// Compiles a [`Statement`] `boa_ast` node.
     pub fn compile_stmt(&mut self, node: &Statement, use_expr: bool, root_statement: bool) {
+        // Grow the native stack on demand: deeply nested statements recurse one
+        // frame per level, so a deep-but-valid tree would otherwise abort the
+        // process. Mirrors `compile_expr` and the parser-side guard. The red zone
+        // must exceed one level's frame cost (see boa_parser's STACK_RED_ZONE).
+        stacker::maybe_grow(1024 * 1024, 8 * 1024 * 1024, || {
+            self.compile_stmt_impl(node, use_expr, root_statement);
+        });
+    }
+
+    fn compile_stmt_impl(&mut self, node: &Statement, use_expr: bool, root_statement: bool) {
         match node {
             Statement::Var(var) => self.compile_var_decl(var),
             Statement::If(node) => self.compile_if(node, use_expr),

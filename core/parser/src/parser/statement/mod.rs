@@ -116,116 +116,118 @@ where
     type Output = ast::Statement;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        // TODO: add BreakableStatement and divide Whiles, fors and so on to another place.
-        let tok = cursor.peek(0, interner).or_abrupt()?;
+        crate::parser::maybe_grow_stack(move || {
+            // TODO: add BreakableStatement and divide Whiles, fors and so on to another place.
+            let tok = cursor.peek(0, interner).or_abrupt()?;
 
-        match tok.kind() {
-            TokenKind::Keyword((Keyword::With, _)) => {
-                WithStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::If, _)) => {
-                IfStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Var, _)) => {
-                VariableStatement::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::While, _)) => {
-                WhileStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Do, _)) => {
-                DoWhileStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::For, _)) => {
-                ForStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-            }
-            TokenKind::Keyword((Keyword::Return, _)) => {
-                if self.allow_return.0 {
-                    ReturnStatement::new(self.allow_yield, self.allow_await)
+            match tok.kind() {
+                TokenKind::Keyword((Keyword::With, _)) => {
+                    WithStatement::new(self.allow_yield, self.allow_await, self.allow_return)
                         .parse(cursor, interner)
                         .map(ast::Statement::from)
-                } else {
-                    Err(Error::unexpected(
-                        tok.to_string(interner),
-                        tok.span(),
-                        "statement",
-                    ))
                 }
-            }
-            TokenKind::Keyword((Keyword::Break, _)) => {
-                BreakStatement::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Continue, _)) => {
-                ContinueStatement::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Try, _)) => {
-                TryStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Throw, _)) => {
-                ThrowStatement::new(self.allow_yield, self.allow_await)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Keyword((Keyword::Switch, _)) => {
-                SwitchStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Punctuator(Punctuator::OpenBlock) => {
-                BlockStatement::new(self.allow_yield, self.allow_await, self.allow_return)
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from)
-            }
-            TokenKind::Punctuator(Punctuator::Semicolon) => {
-                // parse the EmptyStatement
-                cursor.advance(interner);
-                Ok(ast::Statement::Empty)
-            }
-            TokenKind::IdentifierName(_)
-            | TokenKind::Keyword((Keyword::Await | Keyword::Yield, _)) => {
-                // Labelled Statement check
-                cursor.set_goal(InputElement::Div);
-                let tok = cursor.peek(1, interner)?;
-
-                if let Some(tok) = tok
-                    && matches!(tok.kind(), TokenKind::Punctuator(Punctuator::Colon))
-                {
-                    return LabelledStatement::new(
-                        self.allow_yield,
-                        self.allow_await,
-                        self.allow_return,
-                    )
-                    .parse(cursor, interner)
-                    .map(ast::Statement::from);
+                TokenKind::Keyword((Keyword::If, _)) => {
+                    IfStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
                 }
+                TokenKind::Keyword((Keyword::Var, _)) => {
+                    VariableStatement::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::While, _)) => {
+                    WhileStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::Do, _)) => {
+                    DoWhileStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::For, _)) => {
+                    ForStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                }
+                TokenKind::Keyword((Keyword::Return, _)) => {
+                    if self.allow_return.0 {
+                        ReturnStatement::new(self.allow_yield, self.allow_await)
+                            .parse(cursor, interner)
+                            .map(ast::Statement::from)
+                    } else {
+                        Err(Error::unexpected(
+                            tok.to_string(interner),
+                            tok.span(),
+                            "statement",
+                        ))
+                    }
+                }
+                TokenKind::Keyword((Keyword::Break, _)) => {
+                    BreakStatement::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::Continue, _)) => {
+                    ContinueStatement::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::Try, _)) => {
+                    TryStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::Throw, _)) => {
+                    ThrowStatement::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Keyword((Keyword::Switch, _)) => {
+                    SwitchStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Punctuator(Punctuator::OpenBlock) => {
+                    BlockStatement::new(self.allow_yield, self.allow_await, self.allow_return)
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from)
+                }
+                TokenKind::Punctuator(Punctuator::Semicolon) => {
+                    // parse the EmptyStatement
+                    cursor.advance(interner);
+                    Ok(ast::Statement::Empty)
+                }
+                TokenKind::IdentifierName(_)
+                | TokenKind::Keyword((Keyword::Await | Keyword::Yield, _)) => {
+                    // Labelled Statement check
+                    cursor.set_goal(InputElement::Div);
+                    let tok = cursor.peek(1, interner)?;
 
-                ExpressionStatement::new(self.allow_yield, self.allow_await).parse(cursor, interner)
+                    if let Some(tok) = tok
+                        && matches!(tok.kind(), TokenKind::Punctuator(Punctuator::Colon))
+                    {
+                        return LabelledStatement::new(
+                            self.allow_yield,
+                            self.allow_await,
+                            self.allow_return,
+                        )
+                        .parse(cursor, interner)
+                        .map(ast::Statement::from);
+                    }
+
+                    ExpressionStatement::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)
+                }
+                TokenKind::Keyword((Keyword::Debugger, _)) => {
+                    cursor.advance(interner);
+                    cursor.expect_semicolon("debugger statement", interner)?;
+                    Ok(ast::Statement::Debugger)
+                }
+                _ => ExpressionStatement::new(self.allow_yield, self.allow_await)
+                    .parse(cursor, interner),
             }
-            TokenKind::Keyword((Keyword::Debugger, _)) => {
-                cursor.advance(interner);
-                cursor.expect_semicolon("debugger statement", interner)?;
-                Ok(ast::Statement::Debugger)
-            }
-            _ => {
-                ExpressionStatement::new(self.allow_yield, self.allow_await).parse(cursor, interner)
-            }
-        }
+        })
     }
 }
 
