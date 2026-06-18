@@ -46,8 +46,8 @@ type ModuleParseOutput = (boa_ast::Module, boa_ast::SourceText);
 /// zone and off the end of the stack before the following check can fire. One
 /// expression nesting level walks the full ~26-deep operator-precedence chain,
 /// and boa's parser frames are large (the `(` cover-grammar path in particular,
-/// with its arrow-parameter disambiguation), measured at ~156 KiB per level on
-/// aarch64. 1 MiB leaves a generous margin.
+/// with its arrow-parameter disambiguation), measured at ~156 `KiB` per level on
+/// `aarch64`. 1 `MiB` leaves a generous margin.
 pub(crate) const STACK_RED_ZONE: usize = 1024 * 1024;
 
 /// New native-stack segment size for [`maybe_grow_stack`]. Several times
