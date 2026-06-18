@@ -63,7 +63,7 @@ fn same_frame_jump_target(instr: &Instruction) -> Option<u32> {
 pub struct JitBackend {
     module: JITModule,
     /// Monotonic counter for unique symbol names. `JITModule::declare_function`
-    /// deduplicates by name, so reusing a fixed name (e.g. "jit_codeblock")
+    /// deduplicates by name, so reusing a fixed name (e.g. "`jit_codeblock`")
     /// across compilations makes the second `define_function` fail with
     /// `DuplicateDefinition`. Each compile gets a fresh name from this counter.
     next_fn_id: u64,
